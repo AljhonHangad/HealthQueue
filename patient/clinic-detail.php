@@ -59,6 +59,78 @@ try {
     error_log('Clinic rating load failed: ' . $e->getMessage());
 }
 
+// Fetched from the Clinics page's details modal: return just the modal body.
+if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch') {
+    $hoursStmt = $pdo->prepare('SELECT Specialties, OpenDays, OpenTime, CloseTime FROM Clinic WHERE ClinicID = ?');
+    $hoursStmt->execute([$clinicId]);
+    $hours = $hoursStmt->fetch();
+    $dayShort = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => 'Sat', 7 => 'Sun'];
+    $openDayNames = array_map(static fn(string $d): string => $dayShort[(int) $d] ?? '', explode(',', (string) $hours['OpenDays']));
+    $fmt = static fn(string $t): string => date(date('i', strtotime($t)) === '00' ? 'g A' : 'g:i A', strtotime($t));
+    $specialties = array_filter(array_map('trim', explode(',', (string) $hours['Specialties'])), 'strlen');
+    $photoExists = !empty($clinic['PhotoUrl']) && is_file(__DIR__ . '/../assets/uploads/clinics/' . basename($clinic['PhotoUrl']));
+    ?>
+    <div class="cd-modal">
+      <?php if ($photoExists): ?>
+        <img src="<?= HQ_BASE_URL ?>/assets/uploads/clinics/<?= htmlspecialchars($clinic['PhotoUrl']) ?>" alt="" class="cd-photo">
+      <?php endif; ?>
+      <h2><?= htmlspecialchars($clinic['ClinicName']) ?></h2>
+      <p class="modal-subtitle"><?= htmlspecialchars($clinic['Address']) ?><?= $clinic['ContactNumber'] ? ' &middot; ' . htmlspecialchars($clinic['ContactNumber']) : '' ?></p>
+      <?php if ((int) $ratingSummary['review_count'] > 0): ?>
+        <p class="cd-rating">★ <?= number_format((float) $ratingSummary['avg_rating'], 1) ?> <span>(<?= (int) $ratingSummary['review_count'] ?> review<?= (int) $ratingSummary['review_count'] === 1 ? '' : 's' ?>)</span></p>
+      <?php endif; ?>
+      <?php if ($specialties): ?>
+        <div class="cb-tags"><?php foreach ($specialties as $spec): ?><span><?= htmlspecialchars($spec) ?></span><?php endforeach; ?></div>
+      <?php endif; ?>
+
+      <div class="cd-facts">
+        <div><span>Consultation fee</span><strong>₱<?= number_format((float) $clinic['BaseConsultationFee'], 2) ?></strong></div>
+        <div><span>Hours</span><strong><?= htmlspecialchars($fmt($hours['OpenTime']) . ' – ' . $fmt($hours['CloseTime'])) ?></strong><small><?= htmlspecialchars(implode(', ', array_filter($openDayNames))) ?></small></div>
+      </div>
+
+      <?php if (!empty($clinic['Description'])): ?>
+        <h3>About</h3>
+        <p class="cd-text"><?= htmlspecialchars($clinic['Description']) ?></p>
+      <?php endif; ?>
+
+      <h3>Physicians</h3>
+      <?php if ($physicians): ?>
+        <div class="compact-list">
+          <?php foreach ($physicians as $physician): ?>
+            <article>
+              <strong>Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></strong>
+              <span style="display:inline-flex;align-items:center;gap:8px;">
+                <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:<?= $hqStatusDot[$physician['AvailabilityStatus']] ?? '#94a3b8' ?>;"></span>
+                <?= htmlspecialchars($physician['AvailabilityStatus']) ?>
+              </span>
+            </article>
+          <?php endforeach; ?>
+        </div>
+      <?php else: ?>
+        <p class="admin-empty">No physicians are listed for this clinic yet.</p>
+      <?php endif; ?>
+
+      <h3>What patients say</h3>
+      <?php if ($reviews): ?>
+        <div class="compact-list">
+          <?php foreach ($reviews as $review): ?>
+            <article style="align-items:flex-start;flex-direction:column;gap:6px;">
+              <strong style="color:#f59e0b;"><?= str_repeat('★', (int) $review['Rating']) . str_repeat('☆', 5 - (int) $review['Rating']) ?></strong>
+              <p style="margin:0;color:var(--slate-600);font-size:14px;white-space:pre-line;"><?= htmlspecialchars($review['Comment']) ?></p>
+              <span style="color:var(--slate-400);font-size:12px;"><?= htmlspecialchars($review['FirstName']) ?> &middot; <?= htmlspecialchars(date('M j, Y', strtotime($review['CreatedAt']))) ?></span>
+            </article>
+          <?php endforeach; ?>
+        </div>
+      <?php else: ?>
+        <p class="admin-empty">No written reviews yet.</p>
+      <?php endif; ?>
+
+      <a href="<?= HQ_BASE_URL ?>/patient/dashboard.php?book=<?= (int) $clinic['ClinicID'] ?>" class="btn btn-primary btn-block cd-book" data-book-clinic="<?= (int) $clinic['ClinicID'] ?>">Book with this clinic</a>
+    </div>
+    <?php
+    exit;
+}
+
 $pageTitle = htmlspecialchars($clinic['ClinicName']) . ' — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>

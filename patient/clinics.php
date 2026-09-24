@@ -136,8 +136,6 @@ require __DIR__ . '/../includes/header.php';
 ?>
 
 <main class="portal-shell"><div class="container">
-  <section class="portal-hero"><div><span class="eyebrow">Care near you</span><h1>Clinics</h1><p>Search and browse HealthQueue's partner clinics in Cebu City.</p></div></section>
-
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
 
   <section class="portal-section">
@@ -169,21 +167,19 @@ require __DIR__ . '/../includes/header.php';
       <div class="cb-grid">
         <?php foreach ($clinics as $clinic): ?>
           <?php
-            $detailUrl = HQ_BASE_URL . '/patient/clinic-detail.php?clinic_id=' . (int) $clinic['ClinicID'];
-            $bookUrl = HQ_BASE_URL . '/patient/book-appointment.php?clinic=' . (int) $clinic['ClinicID'];
             $tint = $clinic['IsOpen'] ? 'tint-' . ((int) $clinic['ClinicID'] % 5) : 'tint-closed';
           ?>
-          <article class="cb-card">
-            <a href="<?= $detailUrl ?>" class="cb-cover <?= $tint ?>" aria-label="View <?= htmlspecialchars($clinic['ClinicName']) ?>">
+          <article class="cb-card" data-clinic-detail="<?= (int) $clinic['ClinicID'] ?>" tabindex="0" role="button" aria-label="View details for <?= htmlspecialchars($clinic['ClinicName']) ?>">
+            <div class="cb-cover <?= $tint ?>">
               <?php if ($clinic['Photo']): ?>
                 <img src="<?= HQ_BASE_URL ?>/assets/uploads/clinics/<?= htmlspecialchars($clinic['Photo']) ?>" alt="">
               <?php else: ?>
                 <span class="cb-initials"><?= htmlspecialchars($clinic['Initials']) ?></span>
               <?php endif; ?>
               <span class="cb-status <?= $clinic['IsOpen'] ? 'is-open' : 'is-closed' ?>"><?= htmlspecialchars($clinic['HoursLabel']) ?></span>
-            </a>
+            </div>
             <div class="cb-body">
-              <h3><a href="<?= $detailUrl ?>"><?= htmlspecialchars($clinic['ClinicName']) ?></a></h3>
+              <h3><?= htmlspecialchars($clinic['ClinicName']) ?></h3>
               <p class="cb-address">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
                 <?= htmlspecialchars($clinic['Address']) ?>
@@ -209,9 +205,9 @@ require __DIR__ . '/../includes/header.php';
               <div class="cb-footer">
                 <span class="cb-fee">from <strong>₱<?= number_format((float) $clinic['BaseConsultationFee']) ?></strong></span>
                 <?php if ($clinic['IsOpen'] && $clinic['WaitTone'] === 'short'): ?>
-                  <a href="<?= $bookUrl ?>" class="btn btn-primary btn-sm">Book now</a>
+                  <button type="button" class="btn btn-primary btn-sm cb-book" data-book-clinic="<?= (int) $clinic['ClinicID'] ?>">Book now</button>
                 <?php else: ?>
-                  <a href="<?= $bookUrl ?>" class="btn btn-outline btn-sm">Book</a>
+                  <button type="button" class="btn btn-outline btn-sm cb-book" data-book-clinic="<?= (int) $clinic['ClinicID'] ?>">Book</button>
                 <?php endif; ?>
               </div>
             </div>
@@ -223,5 +219,45 @@ require __DIR__ . '/../includes/header.php';
     <?php endif; ?>
   </section>
 </div></main>
+
+<?php require __DIR__ . '/../includes/booking-modal.php'; ?>
+
+<div class="modal-overlay" id="clinicDetailModal">
+  <div class="modal-box modal-box-wide" style="max-height:85vh;overflow-y:auto;">
+    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
+    <div id="clinicDetailContent"><p class="admin-empty">Loading…</p></div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  // Clicking a clinic card opens its details (rendered by clinic-detail.php)
+  // in a modal; the Book button inside a card keeps its own link.
+  var modal = document.getElementById('clinicDetailModal');
+  var content = document.getElementById('clinicDetailContent');
+
+  function openClinic(clinicId) {
+    content.innerHTML = '<p class="admin-empty">Loading…</p>';
+    window.hqOpenModal(modal);
+    fetch('<?= HQ_BASE_URL ?>/patient/clinic-detail.php?clinic_id=' + encodeURIComponent(clinicId), { headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.text(); })
+      .then(function (html) { content.innerHTML = html; })
+      .catch(function () {
+        content.innerHTML = '<p class="form-message error" role="alert">We could not load this clinic. Please try again.</p>';
+      });
+  }
+
+  document.querySelectorAll('[data-clinic-detail]').forEach(function (card) {
+    card.addEventListener('click', function (e) {
+      if (e.target.closest('.cb-book')) return;
+      openClinic(card.getAttribute('data-clinic-detail'));
+    });
+    card.addEventListener('keydown', function (e) {
+      if (e.target !== card) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openClinic(card.getAttribute('data-clinic-detail')); }
+    });
+  });
+});
+</script>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>
