@@ -14,10 +14,12 @@ $profile = ['FirstName' => $user['FirstName'], 'LastName' => $user['LastName'], 
 
 if ($pdo) {
     try {
-        $stmt = $pdo->prepare('SELECT FirstName, LastName, Email, ContactNumber, ProfilePhoto FROM Users WHERE UserID = ?');
+        $stmt = $pdo->prepare('SELECT IDNumber, FirstName, LastName, Email, ContactNumber, ProfilePhoto FROM Users WHERE UserID = ?');
         $stmt->execute([$user['UserID']]);
         if ($row = $stmt->fetch()) {
             $profile = $row;
+            // Accounts created before ID numbers existed get one on first view.
+            if (empty($profile['IDNumber'])) $profile['IDNumber'] = assignUserIdNumber($pdo, (int) $user['UserID']);
         }
     } catch (PDOException $e) {
         error_log('Admin profile load failed: ' . $e->getMessage());
@@ -139,13 +141,20 @@ require __DIR__ . '/../includes/header.php';
   <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
 
   <section class="admin-section">
-    <div class="portal-heading"><div><span class="section-kicker">Photo</span><h2>Profile photo</h2></div></div>
-    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;">
+    <div class="portal-heading"><div><span class="section-kicker">Account</span><h2>Your account</h2></div></div>
+    <div class="profile-identity">
       <?php if (!empty($profile['ProfilePhoto'])): ?>
         <img src="<?= HQ_BASE_URL ?>/assets/uploads/avatars/<?= htmlspecialchars($profile['ProfilePhoto']) ?>" alt="Profile photo" style="width:72px;height:72px;border-radius:50%;object-fit:cover;">
       <?php else: ?>
         <div style="width:72px;height:72px;border-radius:50%;background:var(--slate-100);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--slate-500);font-size:22px;"><?= htmlspecialchars(strtoupper(substr($profile['FirstName'], 0, 1) . substr($profile['LastName'], 0, 1))) ?></div>
       <?php endif; ?>
+      <div class="profile-identity-name">
+        <strong><?= htmlspecialchars($profile['FirstName'] . ' ' . $profile['LastName']) ?></strong>
+        <span><?= htmlspecialchars($user['RoleName']) ?> &middot; <?= htmlspecialchars($profile['Email']) ?></span>
+      </div>
+      <span class="profile-id-badge">ID <?= htmlspecialchars($profile['IDNumber'] ?? '') ?></span>
+    </div>
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-top:16px;">
       <form method="post" enctype="multipart/form-data" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
         <input type="hidden" name="form_type" value="change_photo">

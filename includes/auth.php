@@ -170,3 +170,45 @@ function verifyCsrfToken(?string $submitted): bool
         && !empty($_SESSION['csrf_token'])
         && hash_equals($_SESSION['csrf_token'], $submitted);
 }
+
+/**
+ * Role codes for the public 10-digit ID number: RR YY NNNNNN
+ * (role code, 2-digit registration year, per-role-per-year sequence),
+ * e.g. 0126000001 = first patient registered in 2026.
+ */
+const HQ_ID_ROLE_CODES = ['Patient' => '01', 'Physician' => '02', 'Staff' => '03', 'Admin' => '04'];
+
+/**
+ * Assigns Users.IDNumber to a newly created account (no-op if it already has
+ * one). Call right after the INSERT. The number never changes afterwards --
+ * even if the user's role does -- so it stays safe to print or share.
+ */
+function assignUserIdNumber(PDO $pdo, int $userId): ?string
+{
+    $stmt = $pdo->prepare(
+        'SELECT u.IDNumber, r.RoleName, DATE_FORMAT(u.CreatedAt, "%y") AS Yr
+         FROM Users u JOIN Roles r ON r.RoleID = u.RoleID WHERE u.UserID = ?'
+    );
+    $stmt->execute([$userId]);
+    $row = $stmt->fetch();
+    if (!$row) return null;
+    if ($row['IDNumber']) return $row['IDNumber'];
+
+    $prefix = (HQ_ID_ROLE_CODES[$row['RoleName']] ?? '00') . $row['Yr'];
+
+    // The unique index on IDNumber guards against two sign-ups racing for the
+    // same number; on a collision just recompute and try again.
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        $maxStmt = $pdo->prepare('SELECT MAX(IDNumber) FROM Users WHERE IDNumber LIKE ?');
+        $maxStmt->execute([$prefix . '%']);
+        $max = $maxStmt->fetchColumn();
+        $next = $prefix . str_pad((string) ($max ? (int) substr($max, 4) + 1 : 1), 6, '0', STR_PAD_LEFT);
+        try {
+            $pdo->prepare('UPDATE Users SET IDNumber = ? WHERE UserID = ? AND IDNumber IS NULL')->execute([$next, $userId]);
+            return $next;
+        } catch (PDOException $e) {
+            if ($e->errorInfo[1] !== 1062) throw $e; // 1062 = duplicate key
+        }
+    }
+    throw new RuntimeException('Could not assign an ID number to user ' . $userId);
+}

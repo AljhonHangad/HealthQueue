@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/clinic-hours.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -19,21 +20,10 @@ $sort = isset($sortOptions[$_GET['sort'] ?? '']) ? $_GET['sort'] : 'wait';
 $clinics = [];
 $allSpecialties = [];
 $dataError = null;
-$dayShort = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => 'Sat', 7 => 'Sun'];
-$dayLong = [1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 => 'Friday', 6 => 'Saturday', 7 => 'Sunday'];
-
-$formatTime = static function (string $time): string {
-    $ts = strtotime($time);
-    return date('i', $ts) === '00' ? date('g A', $ts) : date('g:i A', $ts);
-};
 
 if ($pdo) {
     try {
-        // "Now" comes from MySQL so open/closed matches the same clock the
-        // queue uses (PHP's configured timezone may differ from the server's).
-        $now = new DateTimeImmutable((string) $pdo->query('SELECT NOW()')->fetchColumn());
-        $today = (int) $now->format('N');
-        $nowTime = $now->format('H:i:s');
+        $now = clinicNow($pdo);
 
         $sql = "SELECT ClinicID, ClinicName, Address, BaseConsultationFee, PhotoUrl, Specialties, OpenDays, OpenTime, CloseTime
                 FROM Clinic WHERE archived = 0 AND Status = 'Active'";
@@ -52,27 +42,10 @@ if ($pdo) {
                 $allSpecialties[$spec] = ($allSpecialties[$spec] ?? 0) + 1;
             }
 
-            $openDays = array_map('intval', explode(',', (string) $row['OpenDays']));
-            $isOpen = in_array($today, $openDays, true) && $nowTime >= $row['OpenTime'] && $nowTime < $row['CloseTime'];
-
-            if ($isOpen) {
-                $hoursLabel = 'Open · until ' . $formatTime($row['CloseTime']);
-                $nextOpenLabel = null;
-            } elseif (in_array($today, $openDays, true) && $nowTime < $row['OpenTime']) {
-                $hoursLabel = 'Closed · opens ' . $formatTime($row['OpenTime']);
-                $nextOpenLabel = 'Opens today at ' . $formatTime($row['OpenTime']);
-            } else {
-                $hoursLabel = 'Closed';
-                $nextOpenLabel = 'Hours not available';
-                for ($offset = 1; $offset <= 7; $offset++) {
-                    $day = ($today + $offset - 1) % 7 + 1;
-                    if (in_array($day, $openDays, true)) {
-                        $hoursLabel = 'Closed · opens ' . ($offset === 1 ? '' : $dayShort[$day] . ' ') . $formatTime($row['OpenTime']);
-                        $nextOpenLabel = 'Book for ' . ($offset === 1 ? 'tomorrow' : $dayLong[$day]);
-                        break;
-                    }
-                }
-            }
+            $hours = clinicOpenStatus($row, $now);
+            $isOpen = $hours['open'];
+            $hoursLabel = $hours['label'];
+            $nextOpenLabel = $hours['next'];
 
             $inQueue = (int) ($queueCounts[$row['ClinicID']] ?? 0);
             $waitMinutes = $inQueue * MINUTES_PER_PATIENT;
@@ -169,7 +142,7 @@ require __DIR__ . '/../includes/header.php';
           <?php
             $tint = $clinic['IsOpen'] ? 'tint-' . ((int) $clinic['ClinicID'] % 5) : 'tint-closed';
           ?>
-          <article class="cb-card" data-clinic-detail="<?= (int) $clinic['ClinicID'] ?>" tabindex="0" role="button" aria-label="View details for <?= htmlspecialchars($clinic['ClinicName']) ?>">
+          <article class="cb-card" data-clinic-url="<?= HQ_BASE_URL ?>/patient/clinic-detail.php?clinic_id=<?= (int) $clinic['ClinicID'] ?>" tabindex="0" role="link" aria-label="View details for <?= htmlspecialchars($clinic['ClinicName']) ?>">
             <div class="cb-cover <?= $tint ?>">
               <?php if ($clinic['Photo']): ?>
                 <img src="<?= HQ_BASE_URL ?>/assets/uploads/clinics/<?= htmlspecialchars($clinic['Photo']) ?>" alt="">
@@ -222,39 +195,18 @@ require __DIR__ . '/../includes/header.php';
 
 <?php require __DIR__ . '/../includes/booking-modal.php'; ?>
 
-<div class="modal-overlay" id="clinicDetailModal">
-  <div class="modal-box modal-box-wide" style="max-height:85vh;overflow-y:auto;">
-    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
-    <div id="clinicDetailContent"><p class="admin-empty">Loading…</p></div>
-  </div>
-</div>
-
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  // Clicking a clinic card opens its details (rendered by clinic-detail.php)
-  // in a modal; the Book button inside a card keeps its own link.
-  var modal = document.getElementById('clinicDetailModal');
-  var content = document.getElementById('clinicDetailContent');
-
-  function openClinic(clinicId) {
-    content.innerHTML = '<p class="admin-empty">Loading…</p>';
-    window.hqOpenModal(modal);
-    fetch('<?= HQ_BASE_URL ?>/patient/clinic-detail.php?clinic_id=' + encodeURIComponent(clinicId), { headers: { 'X-Requested-With': 'fetch' } })
-      .then(function (res) { return res.text(); })
-      .then(function (html) { content.innerHTML = html; })
-      .catch(function () {
-        content.innerHTML = '<p class="form-message error" role="alert">We could not load this clinic. Please try again.</p>';
-      });
-  }
-
-  document.querySelectorAll('[data-clinic-detail]').forEach(function (card) {
+  // Clicking anywhere on a clinic card opens its details page; the Book
+  // button inside a card opens the booking modal instead (booking-modal.php).
+  document.querySelectorAll('[data-clinic-url]').forEach(function (card) {
     card.addEventListener('click', function (e) {
       if (e.target.closest('.cb-book')) return;
-      openClinic(card.getAttribute('data-clinic-detail'));
+      window.location.href = card.getAttribute('data-clinic-url');
     });
     card.addEventListener('keydown', function (e) {
       if (e.target !== card) return;
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openClinic(card.getAttribute('data-clinic-detail')); }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); window.location.href = card.getAttribute('data-clinic-url'); }
     });
   });
 });

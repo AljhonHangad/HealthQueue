@@ -53,7 +53,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$adminExists && $pdo) {
             } else {
                 $insert = $pdo->prepare('INSERT INTO Users (ClinicID, RoleID, FirstName, LastName, Email, ContactNumber, PasswordHash) VALUES (NULL, ?, ?, ?, ?, ?, ?)');
                 $insert->execute([$role['RoleID'], $values['first_name'], $values['last_name'], $values['email'], $values['contact_number'], password_hash($password, PASSWORD_DEFAULT)]);
-                $admin = ['UserID' => $pdo->lastInsertId(), 'ClinicID' => null, 'RoleID' => $role['RoleID'], 'RoleName' => 'Admin', 'FirstName' => $values['first_name'], 'LastName' => $values['last_name'], 'Email' => $values['email']];
+                $newAdminId = (int) $pdo->lastInsertId();
+                assignUserIdNumber($pdo, $newAdminId);
+                $admin = ['UserID' => $newAdminId, 'ClinicID' => null, 'RoleID' => $role['RoleID'], 'RoleName' => 'Admin', 'FirstName' => $values['first_name'], 'LastName' => $values['last_name'], 'Email' => $values['email']];
                 $pdo->commit();
                 loginUser($admin);
                 header('Location: ' . HQ_BASE_URL . '/admin/dashboard.php');

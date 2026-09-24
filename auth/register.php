@@ -80,8 +80,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     password_hash($password, PASSWORD_DEFAULT),
                 ]);
 
+                $newUserId = (int) $pdo->lastInsertId();
+                assignUserIdNumber($pdo, $newUserId);
+
                 loginUser([
-                    'UserID'    => $pdo->lastInsertId(),
+                    'UserID'    => $newUserId,
                     'ClinicID'  => null,
                     'RoleID'    => $role['RoleID'],
                     'RoleName'  => 'Patient',

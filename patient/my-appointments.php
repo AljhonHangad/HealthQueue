@@ -268,14 +268,6 @@ require __DIR__ . '/../includes/header.php';
         </form>
       </div>
     </section>
-  <?php else: ?>
-    <section class="ma-live ma-live-empty">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-      <div>
-        <h2>No active appointment</h2>
-        <p>When you're added to a clinic's queue today, your number and wait time will show here.</p>
-      </div>
-    </section>
   <?php endif; ?>
 
   <nav class="ma-tabs" aria-label="Filter appointments">

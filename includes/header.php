@@ -199,7 +199,6 @@ $hqIsAdminLayout = $hqUser && in_array($hqUser['RoleName'], $hqSidebarRoles, tru
       <button type="button" class="admin-sidebar-toggle admin-sidebar-toggle-mobile" aria-label="Toggle menu" aria-expanded="false" aria-controls="adminSidebar">
         <span></span><span></span><span></span>
       </button>
-      <span class="admin-topbar-title"><?= htmlspecialchars($pageTitle) ?></span>
       <div class="admin-topbar-icons">
         <?php if (in_array('notifications.php', array_column($hqSidebarNav, 'file'), true)): ?>
           <a href="<?= HQ_BASE_URL ?>/<?= $hqRoleFolder ?>/notifications.php" class="header-icon-btn" aria-label="Notifications">

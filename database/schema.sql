@@ -72,6 +72,11 @@ INSERT IGNORE INTO Roles (RoleName) VALUES
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS Users (
     UserID        INT AUTO_INCREMENT PRIMARY KEY,
+    -- Public 10-digit ID shown to users: RR YY NNNNNN = role code
+    -- (01 Patient, 02 Physician, 03 Staff, 04 Admin), 2-digit registration
+    -- year, per-role-per-year sequence. Set by assignUserIdNumber() in
+    -- includes/auth.php right after the account is created.
+    IDNumber      CHAR(10)     NULL UNIQUE,
     ClinicID      INT NULL,
     RoleID        INT NOT NULL,
     FirstName     VARCHAR(50)  NOT NULL,
@@ -365,6 +370,11 @@ ALTER TABLE Users
     ADD COLUMN IF NOT EXISTS Allergies              VARCHAR(500) NULL,
     ADD COLUMN IF NOT EXISTS EmergencyContactName   VARCHAR(100) NULL,
     ADD COLUMN IF NOT EXISTS EmergencyContactNumber VARCHAR(20)  NULL;
+
+-- Existing users get their IDNumber backfilled by assignUserIdNumber().
+ALTER TABLE Users
+    ADD COLUMN IF NOT EXISTS IDNumber CHAR(10) NULL AFTER UserID,
+    ADD UNIQUE INDEX IF NOT EXISTS uq_users_idnumber (IDNumber);
 
 ALTER TABLE Clinic
     ADD COLUMN IF NOT EXISTS Specialties VARCHAR(255) NULL AFTER Description,

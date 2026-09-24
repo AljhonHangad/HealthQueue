@@ -15,10 +15,12 @@ $bloodTypes = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 
 if ($pdo) {
     try {
-        $stmt = $pdo->prepare('SELECT FirstName, LastName, Email, ContactNumber, ProfilePhoto, CreatedAt, BloodType, Allergies, EmergencyContactName, EmergencyContactNumber FROM Users WHERE UserID = ?');
+        $stmt = $pdo->prepare('SELECT IDNumber, FirstName, LastName, Email, ContactNumber, ProfilePhoto, CreatedAt, BloodType, Allergies, EmergencyContactName, EmergencyContactNumber FROM Users WHERE UserID = ?');
         $stmt->execute([$user['UserID']]);
         if ($row = $stmt->fetch()) {
             $profile = $row;
+            // Accounts created before ID numbers existed get one on first view.
+            if (empty($profile['IDNumber'])) $profile['IDNumber'] = assignUserIdNumber($pdo, (int) $user['UserID']);
         }
     } catch (PDOException $e) {
         error_log('Patient profile load failed: ' . $e->getMessage());
@@ -233,7 +235,7 @@ require __DIR__ . '/../includes/header.php';
       <p class="profile-email"><?= htmlspecialchars($profile['Email']) ?></p>
 
       <dl class="profile-meta-list">
-        <div class="profile-meta-row"><dt>Patient ID</dt><dd>#<?= (int) $user['UserID'] ?></dd></div>
+        <div class="profile-meta-row"><dt>ID Number</dt><dd><?= !empty($profile['IDNumber']) ? htmlspecialchars($profile['IDNumber']) : '<span class="info-empty">Not assigned</span>' ?></dd></div>
         <div class="profile-meta-row"><dt>Contact Number</dt><dd><?= $profile['ContactNumber'] ? htmlspecialchars($profile['ContactNumber']) : '<span class="info-empty">Not provided</span>' ?></dd></div>
         <div class="profile-meta-row"><dt>Member Since</dt><dd><?= $profile['CreatedAt'] ? htmlspecialchars(date('M Y', strtotime($profile['CreatedAt']))) : '<span class="info-empty">Not provided</span>' ?></dd></div>
       </dl>

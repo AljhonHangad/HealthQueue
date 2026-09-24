@@ -60,6 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $role = $roleStmt->fetch();
                     $stmt = $pdo->prepare('INSERT INTO Users (ClinicID, RoleID, FirstName, LastName, Email, ContactNumber, PasswordHash) VALUES (?, ?, ?, ?, ?, ?, ?)');
                     $stmt->execute([(int) $values['clinic_id'], $role['RoleID'], $values['first_name'], $values['last_name'], $values['email'], $values['contact_number'], password_hash($password, PASSWORD_DEFAULT)]);
+                    assignUserIdNumber($pdo, (int) $pdo->lastInsertId());
                     logActivity($pdo, $user['UserID'], (int) $values['clinic_id'], 'Created physician', $values['first_name'] . ' ' . $values['last_name']);
                     $flash = 'Physician account created.';
                 }

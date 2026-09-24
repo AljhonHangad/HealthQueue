@@ -60,6 +60,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $walkInValues['contact_number'], password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT), 'Active',
                         ]);
                         $patientId = (int) $pdo->lastInsertId();
+                        assignUserIdNumber($pdo, $patientId);
                     }
 
                     if (!$errors) {
