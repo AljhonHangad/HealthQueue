@@ -248,24 +248,28 @@ if ($pdo && $clinicId) {
         $physStmt->execute([$clinicId]);
         $physicians = $physStmt->fetchAll();
 
-        // Each physician's weekly schedule (ISO weekdays), used to warn when a
-        // request is assigned to someone who doesn't work that day.
-        $schedStmt = $pdo->prepare(
-            "SELECT pa.PhysicianID, pa.DayOfWeek FROM PhysicianAvailability pa
-             JOIN Users u ON u.UserID = pa.PhysicianID WHERE u.ClinicID = ?"
-        );
-        $schedStmt->execute([$clinicId]);
+        // Each physician's date-based availability, used to warn when a
+        // request is assigned to someone who has no hours (or a day off) then.
         foreach ($physicians as $physician) {
             $physicianSchedule[(int) $physician['UserID']] = [
-                'name'   => 'Dr. ' . $physician['LastName'],
-                'status' => $physician['AvailabilityStatus'],
-                'days'   => [],
+                'name'    => 'Dr. ' . $physician['LastName'],
+                'status'  => $physician['AvailabilityStatus'],
+                'working' => [],
+                'off'     => [],
             ];
         }
-        foreach ($schedStmt->fetchAll() as $slot) {
-            if (isset($physicianSchedule[(int) $slot['PhysicianID']])) {
-                $physicianSchedule[(int) $slot['PhysicianID']]['days'][] = (int) $slot['DayOfWeek'];
-            }
+        $schedStmt = $pdo->prepare(
+            "SELECT pa.PhysicianID, pa.AvailDate, MAX(pa.IsDayOff) AS DayOff, SUM(pa.IsDayOff = 0) AS Blocks
+             FROM PhysicianDateAvailability pa JOIN Users u ON u.UserID = pa.PhysicianID
+             WHERE u.ClinicID = ? AND pa.AvailDate >= CURDATE()
+             GROUP BY pa.PhysicianID, pa.AvailDate"
+        );
+        $schedStmt->execute([$clinicId]);
+        foreach ($schedStmt->fetchAll() as $row) {
+            $pid = (int) $row['PhysicianID'];
+            if (!isset($physicianSchedule[$pid])) continue;
+            if ((int) $row['DayOff']) $physicianSchedule[$pid]['off'][] = $row['AvailDate'];
+            elseif ((int) $row['Blocks']) $physicianSchedule[$pid]['working'][] = $row['AvailDate'];
         }
 
         $todayStmt = $pdo->prepare(
@@ -388,7 +392,7 @@ require __DIR__ . '/../includes/header.php';
             $refund = $req['BookingFeePaid'] ? (float) $req['BaseConsultationFee'] : 0;
             $weekday = (int) date('N', strtotime($req['AppointmentDate']));
           ?>
-          <article class="sa-item" data-request data-weekday="<?= $weekday ?>" data-date-label="<?= htmlspecialchars(date('M j', strtotime($req['AppointmentDate']))) ?>" data-is-today="<?= $req['AppointmentDate'] === $today ? '1' : '0' ?>">
+          <article class="sa-item" data-request data-date="<?= htmlspecialchars($req['AppointmentDate']) ?>" data-weekday="<?= $weekday ?>" data-date-label="<?= htmlspecialchars(date('M j', strtotime($req['AppointmentDate']))) ?>" data-is-today="<?= $req['AppointmentDate'] === $today ? '1' : '0' ?>">
             <div class="sa-head">
               <span class="sa-avatar"><?= htmlspecialchars($initials($req)) ?></span>
               <div>
@@ -535,9 +539,12 @@ document.addEventListener('DOMContentLoaded', function () {
       var info = schedules[select.value];
       var message = '';
       if (info) {
-        var weekday = parseInt(item.getAttribute('data-weekday'), 10);
-        if (info.days.length && info.days.indexOf(weekday) === -1) {
-          message = info.name + ' is unavailable on ' + item.getAttribute('data-date-label') + '. Assign another physician or decline.';
+        var date = item.getAttribute('data-date');
+        var label = item.getAttribute('data-date-label');
+        if (info.off.indexOf(date) !== -1) {
+          message = info.name + ' has a day off on ' + label + '. Assign another physician or decline.';
+        } else if (info.working.indexOf(date) === -1) {
+          message = info.name + ' has no hours set on ' + label + '. Assign another physician or decline.';
         } else if (item.getAttribute('data-is-today') === '1' && info.status !== 'Available') {
           message = info.name + ' is marked "' + info.status + '" today. Assign another physician or decline.';
         }

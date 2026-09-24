@@ -3,6 +3,7 @@ require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/notifications.php';
 require_once __DIR__ . '/../includes/wallet.php';
+require_once __DIR__ . '/../includes/availability.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -22,7 +23,7 @@ if (!$appointmentId || !$pdo) {
 // Scoped to this patient's own UserID -- one patient can never pay for or
 // even see another patient's booking through this page.
 $stmt = $pdo->prepare(
-    "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.BookingFeePaid,
+    "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.BookingFeePaid, a.PhysicianID, a.Status,
             c.ClinicID, c.ClinicName, c.BaseConsultationFee,
             phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName
      FROM Appointments a
@@ -51,8 +52,16 @@ $isAjax = ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form_type'] ?? '') === 'submit_payment') {
     $paymentMode = ($_POST['payment_mode'] ?? '') === 'wallet' ? 'wallet' : 'card';
 
+    $clinicLocked = false;
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
         $errors[] = 'Your session expired. Please try again.';
+    } elseif ($appointment['Status'] !== 'Pending') {
+        $errors[] = 'This request can no longer be paid for.';
+    } elseif (!($clinicLocked = lockClinicBooking($pdo, (int) $appointment['ClinicID']))) {
+        $errors[] = 'The clinic is busy right now. Please try again in a moment.';
+    } elseif (!isBookable($pdo, (int) $appointment['ClinicID'], $appointment['PhysicianID'] ? (int) $appointment['PhysicianID'] : null, $appointment['AppointmentDate'], $appointment['AppointmentTime'], (int) $appointmentId)) {
+        // The unpaid hold expired and the slot was taken (or it's no longer open).
+        $errors[] = 'Sorry, this time slot was taken while your request was unpaid. Please reschedule it from My Appointments, then pay.';
     } else {
         try {
             $pdo->beginTransaction();
@@ -95,6 +104,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form_type'] ?? '') === 'su
             $errors[] = 'We could not process your payment right now. Please try again.';
         }
     }
+    if ($clinicLocked) unlockClinicBooking($pdo, (int) $appointment['ClinicID']);
 
     if ($errors && $isAjax) {
         header('Content-Type: application/json');

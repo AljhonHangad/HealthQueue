@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/wallet.php';
+require_once __DIR__ . '/../includes/availability.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -84,8 +85,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif ($formType === 'reschedule_appointment') {
             $newDate = trim((string) ($_POST['appointment_date'] ?? ''));
             $newTime = trim((string) ($_POST['appointment_time'] ?? ''));
+            $current = $pdo->prepare("SELECT ClinicID, PhysicianID FROM Appointments WHERE AppointmentID = ? AND PatientID = ? AND Status = 'Pending'");
+            $current->execute([$appointmentId, $user['UserID']]);
+            $currentAppt = $current->fetch();
             if ($newDate === '' || $newDate < date('Y-m-d') || $newTime === '') {
                 $errors[] = 'Please choose a valid future date and time.';
+            } elseif ($currentAppt && lockClinicBooking($pdo, (int) $currentAppt['ClinicID']) && !isBookable($pdo, (int) $currentAppt['ClinicID'], $currentAppt['PhysicianID'] ? (int) $currentAppt['PhysicianID'] : null, $newDate, $newTime, $appointmentId)) {
+                // Same rule as new bookings: only inside a physician's published hours.
+                $errors[] = 'That date and time is outside the physician\'s available hours (or already full). Please choose another slot.';
             } else {
                 try {
                     $stmt = $pdo->prepare("UPDATE Appointments SET AppointmentDate = ?, AppointmentTime = ? WHERE AppointmentID = ? AND PatientID = ? AND Status = 'Pending'");

@@ -159,8 +159,14 @@ document.addEventListener('DOMContentLoaded', function () {
 // into a container holding .calendar-month-label / [data-nav] / .calendar-days
 // markup, writes the chosen date (YYYY-MM-DD) into hiddenInput, and disables
 // any day before today. Used by the booking modals' date field.
-window.hqInitCalendar = function (container, hiddenInput, onSelect) {
-  if (!container || !hiddenInput) return;
+//
+// options.isEnabled(iso) -> false greys out a date (e.g. no physician hours);
+// options.noteFor(iso) -> text such as "Fully booked" shown as a tooltip;
+// options.onMonthChange(year, monthIndex) fires when the shown month changes.
+// Returns { render, clear } so callers can refresh after loading data.
+window.hqInitCalendar = function (container, hiddenInput, onSelect, options) {
+  if (!container || !hiddenInput) return null;
+  options = options || {};
 
   var monthLabel = container.querySelector('.calendar-month-label');
   var daysEl = container.querySelector('.calendar-days');
@@ -198,8 +204,14 @@ window.hqInitCalendar = function (container, hiddenInput, onSelect) {
       btn.className = 'calendar-day';
       btn.textContent = String(d);
 
-      if (cellDate.getTime() < today.getTime()) {
+      if (cellDate.getTime() < today.getTime() || (options.isEnabled && !options.isEnabled(iso))) {
         btn.disabled = true;
+      }
+      var note = options.noteFor ? options.noteFor(iso) : '';
+      if (note) {
+        btn.title = note;
+        btn.classList.add('is-full');
+        btn.setAttribute('aria-label', d + ' — ' + note);
       }
       if (cellDate.getTime() === today.getTime()) {
         btn.classList.add('is-today');
@@ -226,6 +238,7 @@ window.hqInitCalendar = function (container, hiddenInput, onSelect) {
       viewMonth--;
       if (viewMonth < 0) { viewMonth = 11; viewYear--; }
       render();
+      if (options.onMonthChange) options.onMonthChange(viewYear, viewMonth);
     });
   }
   if (nextBtn) {
@@ -233,10 +246,17 @@ window.hqInitCalendar = function (container, hiddenInput, onSelect) {
       viewMonth++;
       if (viewMonth > 11) { viewMonth = 0; viewYear++; }
       render();
+      if (options.onMonthChange) options.onMonthChange(viewYear, viewMonth);
     });
   }
 
   render();
+  if (options.onMonthChange) options.onMonthChange(viewYear, viewMonth);
+
+  return {
+    render: render,
+    clear: function () { selectedDate = null; hiddenInput.value = ''; render(); }
+  };
 };
 
 // Notification rows: tap a row to expand its message; tick checkboxes to

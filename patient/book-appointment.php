@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/availability.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -42,6 +43,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         if (!$validPhysician) $errors[] = 'Please choose a physician from the selected clinic.';
+    }
+
+    // Hold a per-clinic lock from the capacity check until the insert, so two
+    // patients can't both take the last spot (MySQL frees it when the request ends).
+    $clinicLocked = false;
+    if (!$errors && $pdo && !($clinicLocked = lockClinicBooking($pdo, (int) $values['clinic_id']))) {
+        $errors[] = 'The clinic is busy right now. Please try again in a moment.';
+    }
+
+    // Only dates/times inside a physician's published hours (with capacity left) can be booked.
+    if (!$errors && $pdo && !isBookable($pdo, (int) $values['clinic_id'], $values['physician_id'] !== '' ? (int) $values['physician_id'] : null, $values['appointment_date'], $values['appointment_time'])) {
+        $errors[] = $values['physician_id'] !== ''
+            ? 'That physician has no open slot at that date and time (it may have just filled up). Please pick one of the available times.'
+            : 'No physician at this clinic has an open slot at that date and time. Please pick one of the available times.';
     }
 
     if (!$errors && $pdo) {
@@ -86,6 +101,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $errors[] = 'We could not submit your appointment request. Please try again.';
         }
     }
+    if ($clinicLocked) unlockClinicBooking($pdo, (int) $values['clinic_id']);
 
     if ($errors && $isAjax) {
         header('Content-Type: application/json');
@@ -95,7 +111,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$pageTitle = 'Book an Appointment â€” HealthQueue';
+$pageTitle = 'Book an Appointment — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>
 

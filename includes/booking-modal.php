@@ -42,10 +42,10 @@ if ($pdo) {
                 <option value="<?= (int) $clinic['ClinicID'] ?>" data-fee="<?= htmlspecialchars(number_format((float) $clinic['BaseConsultationFee'], 2), ENT_QUOTES) ?>"><?= htmlspecialchars($clinic['ClinicName']) ?> &mdash; <?= htmlspecialchars($clinic['Address']) ?></option>
               <?php endforeach; ?>
             </select></label>
-            <label>Preferred physician <span class="optional">(optional)</span><select name="physician_id">
+            <label>Preferred physician <span class="optional">(optional)</span><select name="physician_id" id="bookNowPhysicianSelect">
               <option value="">No preference</option>
               <?php foreach ($bookingPhysicians as $physician): ?>
-                <option value="<?= (int) $physician['UserID'] ?>">Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?> &mdash; <?= htmlspecialchars($physician['ClinicName']) ?></option>
+                <option value="<?= (int) $physician['UserID'] ?>" data-clinic="<?= (int) $physician['ClinicID'] ?>">Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></option>
               <?php endforeach; ?>
             </select></label>
           </div>
@@ -60,11 +60,16 @@ if ($pdo) {
             <div class="calendar-weekdays"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
             <div class="calendar-days"></div>
           </div>
+          <p class="booking-avail-hint" id="bookNowDateHint">Choose a clinic to see available dates.</p>
         </div>
 
         <div>
           <div class="form-stack">
-            <label>Preferred time<input type="time" name="appointment_time" required></label>
+            <label>Preferred time
+              <select name="appointment_time" id="bookNowTimeSelect" required disabled>
+                <option value="">Pick a date first</option>
+              </select>
+            </label>
             <label>Reason for visit <span class="optional">(optional)</span><textarea name="concern" rows="5" placeholder="Briefly describe what you need help with."></textarea></label>
           </div>
 
@@ -176,11 +181,93 @@ document.addEventListener('DOMContentLoaded', function () {
     if (bookParam) window.hqOpenBooking(bookParam);
   }
 
+  // Availability: only dates/times inside a physician's published hours
+  // (physician calendar) are offered. The server re-checks on submit.
   var dateInput = document.getElementById('bookNowDateInput');
   var calendarEl = document.getElementById('bookNowCalendar');
-  if (calendarEl && dateInput && window.hqInitCalendar) {
-    window.hqInitCalendar(calendarEl, dateInput);
+  var physicianSelect = document.getElementById('bookNowPhysicianSelect');
+  var timeSelect = document.getElementById('bookNowTimeSelect');
+  var dateHint = document.getElementById('bookNowDateHint');
+  var availableDates = new Set();
+  var fullDates = new Set();
+  var shownMonth = null;
+  var calendar = null;
+  var availUrl = '<?= HQ_BASE_URL ?>/patient/availability-api.php';
+
+  function availParams() {
+    return 'clinic_id=' + encodeURIComponent(clinicSelect ? clinicSelect.value : '') + '&physician_id=' + encodeURIComponent(physicianSelect ? physicianSelect.value : '');
   }
+  function resetTimes(message) {
+    timeSelect.innerHTML = '<option value="">' + message + '</option>';
+    timeSelect.disabled = true;
+  }
+  function loadDates() {
+    availableDates = new Set();
+    fullDates = new Set();
+    if (calendar) calendar.render();
+    if (!clinicSelect || !clinicSelect.value || !shownMonth) {
+      dateHint.textContent = 'Choose a clinic to see available dates.';
+      return;
+    }
+    dateHint.textContent = 'Loading available dates…';
+    var month = shownMonth;
+    fetch(availUrl + '?' + availParams() + '&month=' + month, { headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (month !== shownMonth) return;
+        availableDates = new Set(data.dates || []);
+        fullDates = new Set(data.full || []);
+        if (calendar) calendar.render();
+        dateHint.textContent = availableDates.size
+          ? 'Blue dates have open times. Greyed-out dates have no hours' + (fullDates.size ? '; struck-through dates are fully booked.' : '.')
+          : (fullDates.size ? 'Every date with hours this month is fully booked' : 'No available dates this month') + (physicianSelect && physicianSelect.value ? ' for this physician' : '') + '. Try the next month' + (physicianSelect && physicianSelect.value ? ' or “No preference”' : '') + '.';
+      })
+      .catch(function () { dateHint.textContent = 'We could not load available dates. Please try again.'; });
+  }
+  function loadTimes(date) {
+    resetTimes('Loading times…');
+    fetch(availUrl + '?' + availParams() + '&date=' + date, { headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var times = data.times || [];
+        if (!times.length) { resetTimes('No open times on this date'); return; }
+        timeSelect.innerHTML = '<option value="">Select a time</option>' + times.map(function (t) {
+          return '<option value="' + t.value + '">' + t.label + '</option>';
+        }).join('');
+        timeSelect.disabled = false;
+      })
+      .catch(function () { resetTimes('Could not load times'); });
+  }
+  function onScopeChange() {
+    if (calendar) calendar.clear();
+    resetTimes('Pick a date first');
+    loadDates();
+  }
+
+  if (calendarEl && dateInput && window.hqInitCalendar) {
+    calendar = window.hqInitCalendar(calendarEl, dateInput, loadTimes, {
+      isEnabled: function (iso) { return availableDates.has(iso); },
+      noteFor: function (iso) { return fullDates.has(iso) ? 'Fully booked' : ''; },
+      onMonthChange: function (year, month) {
+        shownMonth = year + '-' + (month < 9 ? '0' : '') + (month + 1);
+        loadDates();
+      }
+    });
+  }
+  // Only list physicians from the chosen clinic.
+  function filterPhysicians() {
+    if (!physicianSelect) return;
+    Array.prototype.forEach.call(physicianSelect.options, function (opt) {
+      if (!opt.value) return;
+      opt.hidden = opt.disabled = !clinicSelect || opt.getAttribute('data-clinic') !== clinicSelect.value;
+    });
+    if (physicianSelect.selectedOptions[0] && physicianSelect.selectedOptions[0].hidden) physicianSelect.value = '';
+  }
+  if (clinicSelect) clinicSelect.addEventListener('change', function () { filterPhysicians(); onScopeChange(); });
+  if (physicianSelect) physicianSelect.addEventListener('change', onScopeChange);
+  filterPhysicians();
+  // A clinic may already be chosen (e.g. opened via ?book=<ClinicID>).
+  if (clinicSelect && clinicSelect.value) loadDates();
 
   var bookForm = document.getElementById('bookNowForm');
   var bookErrors = document.getElementById('bookNowErrors');

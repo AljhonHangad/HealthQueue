@@ -18,7 +18,12 @@ $dayLong = [1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 
 
 if ($pdo && $clinicId) {
     try {
-        $today = (int) clinicNow($pdo)->format('N');
+        $now = clinicNow($pdo);
+        $today = (int) $now->format('N');
+        // Dates of this week (Mon..Sun), to mark leave days on the strip.
+        $weekStart = $now->modify('-' . ($today - 1) . ' days');
+        $weekDates = [];
+        for ($d = 1; $d <= 7; $d++) $weekDates[$d] = $weekStart->modify('+' . ($d - 1) . ' days')->format('Y-m-d');
 
         $stmt = $pdo->prepare(
             "SELECT u.UserID, u.FirstName, u.LastName, u.AvailabilityStatus,
@@ -32,12 +37,23 @@ if ($pdo && $clinicId) {
         $stmt->execute([$clinicId]);
         $physicians = $stmt->fetchAll();
 
-        $slotStmt = $pdo->prepare('SELECT DayOfWeek, StartTime, EndTime FROM PhysicianAvailability WHERE PhysicianID = ? ORDER BY DayOfWeek, StartTime');
+        // This week's date-based availability: hour blocks and days off.
+        $slotStmt = $pdo->prepare(
+            'SELECT AvailDate, StartTime, EndTime, IsDayOff FROM PhysicianDateAvailability
+             WHERE PhysicianID = ? AND AvailDate BETWEEN ? AND ? ORDER BY AvailDate, StartTime'
+        );
+        $dayForDate = array_flip($weekDates);
         foreach ($physicians as &$physician) {
-            $slotStmt->execute([$physician['UserID']]);
+            $slotStmt->execute([$physician['UserID'], $weekDates[1], $weekDates[7]]);
             $physician['Slots'] = [];
+            $physician['LeaveDays'] = [];
             foreach ($slotStmt->fetchAll() as $slot) {
-                $physician['Slots'][(int) $slot['DayOfWeek']][] = clinicFormatTime($slot['StartTime']) . '–' . clinicFormatTime($slot['EndTime']);
+                $d = $dayForDate[$slot['AvailDate']];
+                if ($slot['IsDayOff']) {
+                    $physician['LeaveDays'][$d] = 'Day off';
+                } else {
+                    $physician['Slots'][$d][] = clinicFormatTime($slot['StartTime']) . '–' . clinicFormatTime($slot['EndTime']);
+                }
             }
             // "In consultation" is derived from the queue, not set by anyone.
             $physician['DisplayStatus'] = $physician['AvailabilityStatus'] === 'Available' && (int) $physician['ServingCount'] > 0
@@ -102,7 +118,7 @@ require __DIR__ . '/../includes/header.php';
       <?php foreach ($physicians as $i => $phy): ?>
         <?php
           $style = $statusStyles[$phy['DisplayStatus']] ?? $statusStyles['Unavailable'];
-          $hasSchedule = (bool) $phy['Slots'];
+          $hasSchedule = (bool) $phy['Slots'] || (bool) $phy['LeaveDays'];
           $todayHours = $phy['Slots'][$today] ?? null;
           if ((int) $phy['ServingCount'] > 0 || $phy['NowServing']) {
               $queueText = 'Serving #' . (int) $phy['NowServing'] . ' · ' . (int) $phy['Waiting'] . ' waiting';
@@ -124,7 +140,7 @@ require __DIR__ . '/../includes/header.php';
           <div class="ph-facts">
             <div>
               <span>Today's hours</span>
-              <strong><?= $todayHours ? htmlspecialchars(implode(', ', $todayHours)) : ($hasSchedule ? 'Off today' : 'No schedule set') ?></strong>
+              <strong><?= isset($phy['LeaveDays'][$today]) ? 'On leave today' : ($todayHours ? htmlspecialchars(implode(', ', $todayHours)) : ($hasSchedule ? 'Not set today' : 'No hours set this week')) ?></strong>
             </div>
             <div class="<?= $phy['DisplayStatus'] === 'On Break' ? 'is-amber' : '' ?>">
               <span>Queue</span>
@@ -134,8 +150,8 @@ require __DIR__ . '/../includes/header.php';
 
           <div class="ph-week" aria-label="Weekly schedule">
             <?php foreach ($dayShort as $dayNum => $label): ?>
-              <?php $cls = $dayNum === $today ? 'is-today' : (isset($phy['Slots'][$dayNum]) ? 'is-working' : 'is-off'); ?>
-              <span class="<?= $cls ?>" title="<?= $dayLong[$dayNum] ?>: <?= isset($phy['Slots'][$dayNum]) ? htmlspecialchars(implode(', ', $phy['Slots'][$dayNum])) : 'off' ?>"><?= $label ?></span>
+              <?php $onLeave = isset($phy['LeaveDays'][$dayNum]); $cls = $onLeave ? 'is-leave' : ($dayNum === $today ? 'is-today' : (isset($phy['Slots'][$dayNum]) ? 'is-working' : 'is-off')); ?>
+              <span class="<?= $cls ?><?= $onLeave && $dayNum === $today ? ' is-today-leave' : '' ?>" title="<?= $dayLong[$dayNum] ?>: <?= $onLeave ? htmlspecialchars($phy['LeaveDays'][$dayNum]) : (isset($phy['Slots'][$dayNum]) ? htmlspecialchars(implode(', ', $phy['Slots'][$dayNum])) : 'off') ?>"><?= $label ?></span>
             <?php endforeach; ?>
           </div>
 
@@ -154,7 +170,7 @@ require __DIR__ . '/../includes/header.php';
       <?php endforeach; ?>
     </div>
     <p class="ma-empty ph-no-match" id="phNoMatch" hidden>No physicians match this filter.</p>
-    <p class="ph-legend">Schedule strip: <b class="ph-green">green</b> working · <b class="ph-blue">blue</b> today · <b class="ph-grey">grey</b> day off. Physicians set their own availability and weekly hours.</p>
+    <p class="ph-legend">Schedule strip: <b class="ph-green">green</b> working · <b class="ph-blue">blue</b> today · <b class="ph-red">red</b> day off · <b class="ph-grey">grey</b> not set. Physicians set their own hours and days off on their calendar.</p>
   <?php else: ?>
     <div class="ma-empty"><h3>No physicians yet</h3><p>Physicians assigned to your clinic will appear here.</p></div>
   <?php endif; ?>

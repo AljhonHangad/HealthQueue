@@ -433,3 +433,26 @@ ALTER TABLE Queue
 -- Optional photo attached to an announcement (file in assets/uploads/announcements).
 ALTER TABLE Announcements
     ADD COLUMN IF NOT EXISTS PhotoPath VARCHAR(255) NULL AFTER Message;
+
+-- Weekly schedule extras: optional booking capacity per hour, and an Active
+-- flag so a physician can switch a whole day off without losing its hours.
+ALTER TABLE PhysicianAvailability
+    ADD COLUMN IF NOT EXISTS PatientsPerHour TINYINT NULL AFTER EndTime,
+    ADD COLUMN IF NOT EXISTS Active TINYINT NOT NULL DEFAULT 1 AFTER PatientsPerHour;
+
+-- Physician availability by calendar date (replaces the weekly
+-- PhysicianAvailability schedule). A date with hour blocks is bookable; a
+-- row with IsDayOff = 1 marks a day off; a date with no rows is "not set"
+-- and not bookable.
+CREATE TABLE IF NOT EXISTS PhysicianDateAvailability (
+    SlotID          INT AUTO_INCREMENT PRIMARY KEY,
+    PhysicianID     INT NOT NULL,
+    AvailDate       DATE NOT NULL,
+    StartTime       TIME NULL,
+    EndTime         TIME NULL,
+    PatientsPerHour TINYINT NULL,
+    IsDayOff        TINYINT NOT NULL DEFAULT 0,
+    CreatedAt       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_dateavail_physician FOREIGN KEY (PhysicianID) REFERENCES Users (UserID),
+    INDEX idx_dateavail_physician_date (PhysicianID, AvailDate)
+);
