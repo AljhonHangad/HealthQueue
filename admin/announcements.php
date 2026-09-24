@@ -101,7 +101,7 @@ require __DIR__ . '/../includes/header.php';
         <?php endforeach; ?>
       </div>
     <?php else: ?>
-      <p class="admin-empty">No announcement have been posted yet.</p>
+      <p class="admin-empty">No announcements have been posted yet.</p>
     <?php endif; ?>
   </section>
 </div></main>
