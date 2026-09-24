@@ -653,7 +653,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 .admin-sidebar-brand-row {
-  display: flex; align-items: center; padding: 18px 22px;
+  display: flex; align-items: center; padding: 0 22px; height: 64px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-shrink: 0;
   transition: padding 0.28s ease-in-out;
 }
@@ -708,7 +708,7 @@ a { color: inherit; text-decoration: none; }
    visually "takes over" the brand row as everything around it shrinks away,
    as one coordinated motion with the sidebar's own width transition. */
 .admin-sidebar.is-collapsed { width: 70px; }
-.admin-sidebar.is-collapsed .admin-sidebar-brand-row { padding: 18px 14px; }
+.admin-sidebar.is-collapsed .admin-sidebar-brand-row { padding: 0 14px; }
 .admin-sidebar.is-collapsed .admin-sidebar-brand { max-width: 0; opacity: 0; margin-left: 0; pointer-events: none; }
 .admin-sidebar.is-collapsed .admin-nav-label { max-width: 0; opacity: 0; }
 .admin-sidebar.is-collapsed .admin-nav-badge { max-width: 0; opacity: 0; padding: 2px 0; margin-left: 0; }
@@ -915,6 +915,11 @@ a { color: inherit; text-decoration: none; }
 .header-icon-avatar { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 50%; background: var(--slate-200); color: var(--slate-600); font-size: 13px; font-weight: 800; overflow: hidden; }
 .header-icon-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .portal-hero .eyebrow { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.14); color: #e0f7fa; }
+.wallet-hero { position: relative; }
+.wallet-add-btn { position: absolute; top: 50%; right: 36px; transform: translateY(-50%); width: 56px; height: 56px; border-radius: 50%; border: 0; background: var(--teal-600); color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 6px 16px rgba(0,0,0,.25); transition: background .15s ease, transform .15s ease; }
+.wallet-add-btn:hover { background: var(--teal-700); transform: translateY(-50%) scale(1.06); }
+.wallet-hero > div { padding-right: 76px; }
+.wallet-add-btn:focus-visible { outline: 3px solid #e0f7fa; outline-offset: 2px; }
 .portal-section { margin-top: 48px; }
 .portal-heading { display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; margin-bottom: 18px; }
 .section-kicker { display: block; color: var(--teal-700); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
@@ -1125,7 +1130,7 @@ button.text-link { background: none; border: none; padding: 0; font-family: inhe
   /* Collapsed state is a desktop-only concept -- always show the full brand,
      labels, and badges in the off-canvas mobile drawer regardless of
      whatever the desktop toggle state happens to be. */
-  .admin-sidebar.is-collapsed .admin-sidebar-brand-row { padding: 18px 22px; }
+  .admin-sidebar.is-collapsed .admin-sidebar-brand-row { padding: 0 22px; }
   .admin-sidebar.is-collapsed .admin-sidebar-brand { max-width: 200px; opacity: 1; margin-left: 10px; pointer-events: auto; }
   .admin-sidebar.is-collapsed .admin-nav-label { max-width: 160px; opacity: 1; }
   .admin-sidebar.is-collapsed .admin-nav-badge { max-width: 40px; opacity: 1; padding: 2px 7px; margin-left: auto; }

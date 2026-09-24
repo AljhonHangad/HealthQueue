@@ -98,31 +98,15 @@ require __DIR__ . '/../includes/header.php';
 ?>
 
 <main class="portal-shell"><div class="container">
-  <section class="portal-hero"><div><span class="eyebrow">Wallet</span><h1>PHP <?= number_format($balance, 2) ?></h1><p>Your simulated HealthQueue wallet balance. Use it to pay booking fees instantly at checkout.</p></div></section>
+  <section class="portal-hero wallet-hero">
+    <div><span class="eyebrow">Wallet</span><h1>PHP <?= number_format($balance, 2) ?></h1><p>Your simulated HealthQueue wallet balance. Use it to pay booking fees instantly at checkout.</p></div>
+    <button type="button" class="wallet-add-btn" data-modal-open="addFundsModal" aria-label="Add funds" title="Add funds">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </section>
 
   <?php if ($flash): ?><p class="form-message success" role="status"><?= htmlspecialchars($flash) ?></p><?php endif; ?>
-  <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
-
-  <section class="portal-section">
-    <div class="portal-heading"><div><span class="section-kicker">Top up</span><h2>Add funds</h2></div></div>
-    <div class="dev-note" style="margin-bottom:16px;">
-      <strong>Simulated wallet:</strong> HealthQueue is not connected to a real payment processor. Topping up instantly credits your balance for demonstration purposes — no real transaction occurs and no money changes hands.
-    </div>
-    <form method="post" style="max-width:420px;">
-      <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
-      <input type="hidden" name="form_type" value="top_up">
-      <div class="form-stack form-cols-2">
-        <?php foreach ([200, 500, 1000, 2000] as $preset): ?>
-          <button type="submit" name="amount" value="<?= $preset ?>" class="btn btn-outline btn-sm">+ PHP <?= number_format($preset) ?></button>
-        <?php endforeach; ?>
-      </div>
-      <div class="form-stack" style="margin-top:10px;">
-        <label>Custom amount (PHP)<input type="number" name="custom_amount" step="0.01" min="1" max="50000" placeholder="e.g. 750"></label>
-      </div>
-      <button type="submit" class="btn btn-primary btn-block">Add Funds (Simulated)</button>
-    </form>
-  </section>
 
   <section class="portal-section">
     <div class="portal-heading"><div><span class="section-kicker">History</span><h2>Transaction history</h2></div></div>
@@ -166,5 +150,38 @@ require __DIR__ . '/../includes/header.php';
     <?php endif; ?>
   </section>
 </div></main>
+
+<div class="modal-overlay" id="addFundsModal">
+  <div class="modal-box">
+    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
+    <h2>Add Funds</h2>
+    <p class="modal-subtitle">Pick an amount or enter your own (up to PHP 50,000).</p>
+    <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
+    <div class="dev-note" style="margin-bottom:16px;">
+      <strong>Simulated wallet:</strong> HealthQueue is not connected to a real payment processor. Topping up instantly credits your balance for demonstration purposes — no real transaction occurs and no money changes hands.
+    </div>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+      <input type="hidden" name="form_type" value="top_up">
+      <div class="form-stack form-cols-2">
+        <?php foreach ([200, 500, 1000, 2000] as $preset): ?>
+          <button type="submit" name="amount" value="<?= $preset ?>" class="btn btn-outline btn-sm">+ PHP <?= number_format($preset) ?></button>
+        <?php endforeach; ?>
+      </div>
+      <div class="form-stack" style="margin-top:10px;">
+        <label>Custom amount (PHP)<input type="number" name="custom_amount" step="0.01" min="1" max="50000" placeholder="e.g. 750"></label>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">Add Funds (Simulated)</button>
+    </form>
+  </div>
+</div>
+
+<?php if ($errors): ?>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  window.hqOpenModal(document.getElementById('addFundsModal'));
+});
+</script>
+<?php endif; ?>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>
