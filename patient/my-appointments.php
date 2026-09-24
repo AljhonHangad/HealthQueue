@@ -11,15 +11,18 @@ $pdo = getDbConnection();
 $errors = [];
 $flash = '';
 
+// Tab key => [label, Appointments.Status it shows (null = everything)].
+// Keys are kept stable because the Wallet page links to ?tab=<key>.
 $tabs = [
-    'pending'  => 'Pending',
-    'approved' => 'Confirmed',
-    'rejected' => 'Cancelled',
-    'done'     => 'Completed',
+    'all'      => ['All', null],
+    'pending'  => ['Pending', 'Pending'],
+    'approved' => ['Approved', 'Confirmed'],
+    'rejected' => ['Declined', 'Cancelled'],
+    'done'     => ['Completed', 'Completed'],
 ];
-$activeTab = $_GET['tab'] ?? 'pending';
+$activeTab = $_GET['tab'] ?? 'all';
 if (!isset($tabs[$activeTab])) {
-    $activeTab = 'pending';
+    $activeTab = 'all';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -101,98 +104,280 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+const MINUTES_PER_PATIENT = 15;
+
 $appointments = [];
+$tabCounts = array_fill_keys(array_keys($tabs), 0);
+$activeQueue = null;
 $dataError = null;
 
 if ($pdo) {
     try {
+        $countStmt = $pdo->prepare('SELECT Status, COUNT(*) FROM Appointments WHERE PatientID = ? GROUP BY Status');
+        $countStmt->execute([$user['UserID']]);
+        foreach ($countStmt->fetchAll(PDO::FETCH_KEY_PAIR) as $status => $count) {
+            foreach ($tabs as $key => [, $tabStatus]) {
+                if ($tabStatus === $status) $tabCounts[$key] = (int) $count;
+            }
+            $tabCounts['all'] += (int) $count;
+        }
+
+        $statusFilter = $tabs[$activeTab][1];
         $stmt = $pdo->prepare(
             "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.Status, a.BookingFeePaid, a.CancellationReason,
+                    TIMESTAMPDIFF(MINUTE, a.CreatedAt, NOW()) AS MinutesSinceRequest,
                     c.ClinicName, c.Address, c.BaseConsultationFee,
-                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName
+                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName,
+                    (SELECT COALESCE(SUM(t.Amount), 0) FROM WalletTransactions t
+                     WHERE t.RelatedAppointmentID = a.AppointmentID AND t.Type = 'Refund') AS RefundAmount,
+                    (SELECT q.QueueNumber FROM Queue q
+                     WHERE q.AppointmentID = a.AppointmentID AND DATE(q.CreatedAt) = CURDATE()
+                       AND q.Status IN ('Waiting', 'Calling', 'Serving')
+                     ORDER BY q.CreatedAt DESC LIMIT 1) AS TodayQueueNumber
              FROM Appointments a
              JOIN Clinic c ON c.ClinicID = a.ClinicID
              LEFT JOIN Users phy ON phy.UserID = a.PhysicianID
-             WHERE a.PatientID = ? AND a.Status = ?
+             WHERE a.PatientID = ?" . ($statusFilter ? ' AND a.Status = ?' : '') . "
              ORDER BY a.AppointmentDate DESC, a.AppointmentTime DESC"
         );
-        $stmt->execute([$user['UserID'], $tabs[$activeTab]]);
+        $stmt->execute($statusFilter ? [$user['UserID'], $statusFilter] : [$user['UserID']]);
         $appointments = $stmt->fetchAll();
+
+        // Today's live queue entry (if any) is pinned above the list.
+        $queueStmt = $pdo->prepare(
+            "SELECT q.QueueNumber, q.Status, q.ClinicID, c.ClinicName, c.Address,
+                    a.AppointmentID, a.AppointmentTime, a.Concern,
+                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName
+             FROM Queue q
+             JOIN Appointments a ON a.AppointmentID = q.AppointmentID
+             JOIN Clinic c ON c.ClinicID = q.ClinicID
+             LEFT JOIN Users phy ON phy.UserID = q.PhysicianID
+             WHERE a.PatientID = ? AND DATE(q.CreatedAt) = CURDATE() AND q.Status IN ('Waiting', 'Calling', 'Serving')
+             ORDER BY q.CreatedAt DESC LIMIT 1"
+        );
+        $queueStmt->execute([$user['UserID']]);
+        $activeQueue = $queueStmt->fetch() ?: null;
+
+        if ($activeQueue) {
+            $posStmt = $pdo->prepare(
+                "SELECT COUNT(*) AS Total, COALESCE(SUM(Status = 'Waiting'), 0) AS Ahead
+                 FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND QueueNumber < ? AND Status <> 'Removed'"
+            );
+            $posStmt->execute([$activeQueue['ClinicID'], $activeQueue['QueueNumber']]);
+            $pos = $posStmt->fetch();
+            $total = (int) $pos['Total'];
+            $activeQueue['Ahead'] = $activeQueue['Status'] === 'Waiting' ? (int) $pos['Ahead'] : 0;
+            $activeQueue['WaitMinutes'] = $activeQueue['Ahead'] * MINUTES_PER_PATIENT;
+            // How far the line has moved towards this patient.
+            $activeQueue['Progress'] = $activeQueue['Status'] !== 'Waiting' || $total === 0
+                ? 100 : (int) round(($total - $activeQueue['Ahead']) / $total * 100);
+        }
     } catch (PDOException $e) {
         error_log('My appointments load failed: ' . $e->getMessage());
         $dataError = 'Your appointments are temporarily unavailable.';
     }
 }
 
+$statusPills = [
+    'Pending'   => ['Pending', 'ma-pill-pending'],
+    'Confirmed' => ['Approved', 'ma-pill-approved'],
+    'Completed' => ['Completed', 'ma-pill-completed'],
+];
+
+$timeAgo = static function (int $minutes): string {
+    if ($minutes < 1) return 'just now';
+    if ($minutes < 60) return $minutes . ' min ago';
+    if ($minutes < 1440) {
+        $h = intdiv($minutes, 60);
+        return $h . ' hour' . ($h === 1 ? '' : 's') . ' ago';
+    }
+    $d = intdiv($minutes, 1440);
+    return $d . ' day' . ($d === 1 ? '' : 's') . ' ago';
+};
+
+$serviceLabel = static function (?string $concern): string {
+    $concern = trim(preg_replace('/\s+/', ' ', (string) $concern));
+    if ($concern === '') return 'General consultation';
+    return mb_strlen($concern) > 40 ? mb_substr($concern, 0, 40) . '…' : $concern;
+};
+
+$emptyStates = [
+    'all'      => 'You have no appointments yet',
+    'pending'  => 'No requests waiting for approval',
+    'approved' => 'No approved appointments',
+    'rejected' => 'No declined or cancelled requests',
+    'done'     => 'No completed visits yet',
+];
+
 $pageTitle = 'My Appointments — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>
 
-<main class="portal-shell"><div class="container">
-  <section class="portal-hero"><div><span class="eyebrow">My schedule</span><h1>My Appointments</h1><p>Every request you've made, past and present.</p></div></section>
-
+<main class="portal-shell"><div class="container ma-page">
   <?php if (isset($_GET['paid'])): ?><p class="form-message success" role="status">Payment received — your request has been sent to the clinic.</p><?php endif; ?>
   <?php if ($flash): ?><p class="form-message success" role="status"><?= htmlspecialchars($flash) ?></p><?php endif; ?>
   <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
 
-  <section class="portal-section">
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px;">
-      <?php foreach (['pending' => 'Pending', 'approved' => 'Approved', 'rejected' => 'Rejected', 'done' => 'Done'] as $key => $label): ?>
-        <a href="?tab=<?= $key ?>" class="btn btn-sm <?= $activeTab === $key ? 'btn-primary' : 'btn-outline' ?>"><?= $label ?></a>
-      <?php endforeach; ?>
-    </div>
+  <?php if ($activeQueue): ?>
+    <?php
+      $queuePill = ['Waiting' => 'Approved · today', 'Calling' => 'Now calling you', 'Serving' => 'In consultation'][$activeQueue['Status']] ?? 'Today';
+      $queueMeta = $serviceLabel($activeQueue['Concern'])
+          . ($activeQueue['PhyFirstName'] ? ' · Dr. ' . $activeQueue['PhyLastName'] : '')
+          . ' · ' . date('g:i A', strtotime($activeQueue['AppointmentTime']));
+      if ($activeQueue['Status'] !== 'Waiting') {
+          $aheadText = $queuePill;
+      } elseif ($activeQueue['Ahead'] === 0) {
+          $aheadText = "You're next";
+      } else {
+          $aheadText = $activeQueue['Ahead'] . ' ahead of you';
+      }
+    ?>
+    <section class="ma-live">
+      <div class="ma-live-top">
+        <div>
+          <span class="ma-pill ma-pill-approved"><?= htmlspecialchars($queuePill) ?></span>
+          <h2><?= htmlspecialchars($activeQueue['ClinicName']) ?></h2>
+          <p><?= htmlspecialchars($queueMeta) ?></p>
+        </div>
+        <div class="ma-live-number"><span>Your number</span><strong>#<?= (int) $activeQueue['QueueNumber'] ?></strong></div>
+      </div>
+      <div class="ma-live-progress-row">
+        <span>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <?= htmlspecialchars($aheadText) ?>
+        </span>
+        <span class="ma-live-wait"><?= $activeQueue['Status'] === 'Waiting' ? '~' . (int) $activeQueue['WaitMinutes'] . ' min wait' : 'Please proceed' ?></span>
+      </div>
+      <div class="ma-live-bar"><span style="width:<?= (int) $activeQueue['Progress'] ?>%;"></span></div>
+      <div class="ma-live-actions">
+        <a href="<?= HQ_BASE_URL ?>/patient/queue-status.php" class="btn btn-primary btn-sm">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          View live queue
+        </a>
+        <a href="https://www.google.com/maps/search/?api=1&amp;query=<?= urlencode($activeQueue['Address']) ?>" class="btn btn-outline btn-sm" target="_blank" rel="noopener">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+          Directions
+        </a>
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+          <input type="hidden" name="form_type" value="cancel_appointment">
+          <input type="hidden" name="appointment_id" value="<?= (int) $activeQueue['AppointmentID'] ?>">
+          <input type="hidden" name="cancellation_reason">
+          <button type="button" class="btn btn-outline btn-sm ma-danger" data-confirm-modal="cancelConfirmModal">Cancel</button>
+        </form>
+      </div>
+    </section>
+  <?php else: ?>
+    <section class="ma-live ma-live-empty">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      <div>
+        <h2>No active appointment</h2>
+        <p>When you're added to a clinic's queue today, your number and wait time will show here.</p>
+      </div>
+    </section>
+  <?php endif; ?>
 
-    <?php if ($appointments): ?>
-      <div class="compact-list">
-        <?php foreach ($appointments as $appt): ?>
-          <article id="appt-<?= (int) $appt['AppointmentID'] ?>" style="align-items:flex-start;flex-direction:column;gap:10px;">
-            <div style="display:flex;justify-content:space-between;width:100%;flex-wrap:wrap;gap:10px;">
-              <div>
-                <strong><?= htmlspecialchars($appt['ClinicName']) ?></strong>
-                <span style="display:block;color:var(--slate-500);font-size:13px;"><?= htmlspecialchars(date('M j, Y', strtotime($appt['AppointmentDate']))) ?> at <?= htmlspecialchars(date('g:i A', strtotime($appt['AppointmentTime']))) ?></span>
-              </div>
-              <div style="display:flex;gap:8px;align-items:center;">
-                <?php if ($appt['Status'] === 'Pending' && !$appt['BookingFeePaid']): ?>
-                  <a href="<?= HQ_BASE_URL ?>/patient/checkout.php?appointment_id=<?= (int) $appt['AppointmentID'] ?>" class="btn btn-primary btn-sm">Complete Payment</a>
+  <nav class="ma-tabs" aria-label="Filter appointments">
+    <?php foreach ($tabs as $key => [$label]): ?>
+      <a href="?tab=<?= $key ?>" class="ma-tab<?= $activeTab === $key ? ' is-active' : '' ?>"<?= $activeTab === $key ? ' aria-current="page"' : '' ?>><?= $label ?> <span><?= $tabCounts[$key] ?></span></a>
+    <?php endforeach; ?>
+  </nav>
+
+  <?php if ($appointments): ?>
+    <div class="ma-list">
+      <?php foreach ($appointments as $appt): ?>
+        <?php
+          $id = (int) $appt['AppointmentID'];
+          $ts = strtotime($appt['AppointmentDate']);
+          $time = date('g:i A', strtotime($appt['AppointmentTime']));
+          $doctor = $appt['PhyFirstName'] ? 'Dr. ' . $appt['PhyLastName'] : null;
+          $meta = [$serviceLabel($appt['Concern'])];
+          switch ($appt['Status']) {
+              case 'Pending':
+                  $meta[] = $time;
+                  $meta[] = $appt['BookingFeePaid'] ? 'requested ' . $timeAgo((int) $appt['MinutesSinceRequest']) : 'awaiting payment';
+                  break;
+              case 'Confirmed':
+                  $meta[] = $time;
+                  $meta[] = $appt['TodayQueueNumber'] ? 'queue #' . (int) $appt['TodayQueueNumber'] : ($doctor ?: 'physician to be assigned');
+                  break;
+              case 'Cancelled':
+                  $meta[] = $appt['CancellationReason'] ?: 'Declined by the clinic';
+                  break;
+              case 'Completed':
+                  if ($doctor) $meta[] = $doctor;
+                  break;
+          }
+          // Staff rejections leave CancellationReason empty; patient
+          // cancellations always record one.
+          $isDeclined = $appt['Status'] === 'Cancelled' && !$appt['CancellationReason'];
+          if ($appt['Status'] === 'Cancelled') {
+              [$pillLabel, $pillClass] = [$isDeclined ? 'Declined' : 'Cancelled', 'ma-pill-declined'];
+          } else {
+              [$pillLabel, $pillClass] = $statusPills[$appt['Status']] ?? [$appt['Status'], ''];
+          }
+          $cancelForm = '<form method="post"><input type="hidden" name="csrf_token" value="' . htmlspecialchars(csrfToken()) . '">'
+              . '<input type="hidden" name="form_type" value="cancel_appointment"><input type="hidden" name="appointment_id" value="' . $id . '">'
+              . '<input type="hidden" name="cancellation_reason">';
+        ?>
+        <article class="ma-row" id="appt-<?= $id ?>">
+          <div class="ma-date"><span><?= strtoupper(date('M', $ts)) ?></span><strong><?= date('j', $ts) ?></strong></div>
+          <div class="ma-info">
+            <strong><?= htmlspecialchars($appt['ClinicName']) ?></strong>
+            <p><?= htmlspecialchars(implode(' · ', $meta)) ?></p>
+            <div class="ma-links">
+              <?php if ($appt['Status'] === 'Pending'): ?>
+                <?php if (!$appt['BookingFeePaid']): ?>
+                  <a href="<?= HQ_BASE_URL ?>/patient/checkout.php?appointment_id=<?= $id ?>" class="ma-link-strong">Complete payment</a>
                 <?php endif; ?>
-                <button type="button" class="btn btn-ghost btn-sm view-concern-btn" data-target="details-<?= (int) $appt['AppointmentID'] ?>">View Appointment Details</button>
-              </div>
+                <button type="button" class="view-concern-btn" data-target="resched-<?= $id ?>">Reschedule</button>
+                <?= $cancelForm ?><button type="button" data-confirm-modal="cancelConfirmModal">Cancel request</button></form>
+              <?php elseif ($appt['Status'] === 'Confirmed'): ?>
+                <?php if ($appt['TodayQueueNumber']): ?><a href="<?= HQ_BASE_URL ?>/patient/queue-status.php">View queue</a><?php endif; ?>
+                <?= $cancelForm ?><button type="button" data-confirm-modal="cancelConfirmModal">Cancel</button></form>
+              <?php elseif ($appt['Status'] === 'Cancelled' && (float) $appt['RefundAmount'] > 0): ?>
+                <span class="ma-refund">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 13h2M2 10h20"/></svg>
+                  ₱<?= number_format((float) $appt['RefundAmount']) ?> refunded to wallet
+                </span>
+              <?php elseif ($appt['Status'] === 'Completed'): ?>
+                <button type="button" data-view-record="<?= $id ?>">View medical record</button>
+              <?php endif; ?>
             </div>
-
-            <div id="details-<?= (int) $appt['AppointmentID'] ?>" class="dev-note" style="display:none;width:100%;">
-              <strong>Physician:</strong> <?= $appt['PhyFirstName'] ? htmlspecialchars('Dr. ' . $appt['PhyFirstName'] . ' ' . $appt['PhyLastName']) : 'Not yet assigned' ?><br>
-              <strong>Address:</strong> <?= htmlspecialchars($appt['Address']) ?><br>
-              <strong>Reason:</strong> <?= htmlspecialchars($appt['Concern'] ?: 'Not provided') ?><br>
-              <strong>Consultation fee:</strong> PHP <?= number_format((float) $appt['BaseConsultationFee'], 2) ?><br>
-              <strong>Booking fee:</strong> <?= $appt['BookingFeePaid'] ? 'Paid' : 'Not yet paid' ?>
-              <?php if ($appt['Status'] === 'Cancelled' && $appt['CancellationReason']): ?><br><strong>Cancellation reason:</strong> <?= htmlspecialchars($appt['CancellationReason']) ?><?php endif; ?>
-            </div>
-
             <?php if ($appt['Status'] === 'Pending'): ?>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <button type="button" class="btn btn-outline btn-sm view-concern-btn" data-target="resched-<?= (int) $appt['AppointmentID'] ?>">Reschedule Appointment</button>
-                <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="cancel_appointment"><input type="hidden" name="appointment_id" value="<?= (int) $appt['AppointmentID'] ?>"><input type="hidden" name="cancellation_reason"><button type="button" class="btn btn-outline btn-sm" data-confirm-modal="cancelConfirmModal">Cancel Appointment</button></form>
-              </div>
-              <form method="post" id="resched-<?= (int) $appt['AppointmentID'] ?>" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;">
+              <form method="post" id="resched-<?= $id ?>" class="ma-resched" style="display:none;">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
                 <input type="hidden" name="form_type" value="reschedule_appointment">
-                <input type="hidden" name="appointment_id" value="<?= (int) $appt['AppointmentID'] ?>">
+                <input type="hidden" name="appointment_id" value="<?= $id ?>">
                 <input type="date" name="appointment_date" min="<?= date('Y-m-d') ?>" value="<?= htmlspecialchars($appt['AppointmentDate']) ?>" required>
                 <input type="time" name="appointment_time" value="<?= htmlspecialchars($appt['AppointmentTime']) ?>" required>
                 <button type="submit" class="btn btn-outline btn-sm">Save new schedule</button>
               </form>
-            <?php elseif ($appt['Status'] === 'Confirmed'): ?>
-              <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="cancel_appointment"><input type="hidden" name="appointment_id" value="<?= (int) $appt['AppointmentID'] ?>"><input type="hidden" name="cancellation_reason"><button type="button" class="btn btn-outline btn-sm" data-confirm-modal="cancelConfirmModal">Cancel Appointment</button></form>
             <?php endif; ?>
-          </article>
-        <?php endforeach; ?>
-      </div>
-    <?php else: ?>
-      <div class="empty-state"><div class="empty-icon">+</div><h3>Nothing here yet</h3><p>Appointments in this state will show up here.</p></div>
-    <?php endif; ?>
-  </section>
+          </div>
+          <span class="ma-pill <?= $pillClass ?>"><?= htmlspecialchars($pillLabel) ?></span>
+        </article>
+      <?php endforeach; ?>
+    </div>
+  <?php else: ?>
+    <div class="ma-empty">
+      <h3><?= htmlspecialchars($emptyStates[$activeTab]) ?></h3>
+      <p>Find a clinic and book your next visit.</p>
+      <a href="<?= HQ_BASE_URL ?>/patient/clinics.php" class="btn btn-outline btn-sm">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6M10 9h4M12 7v4"/></svg>
+        Find a clinic
+      </a>
+    </div>
+  <?php endif; ?>
 </div></main>
+
+<div class="modal-overlay" id="viewRecordModal">
+  <div class="modal-box modal-box-wide" style="max-height:85vh;">
+    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
+    <div id="viewRecordContent"><p class="admin-empty">Loading…</p></div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="cancelConfirmModal">
   <div class="modal-box">
@@ -276,6 +461,37 @@ require __DIR__ . '/../includes/header.php';
       }
     });
   }
+
+  // "View medical record" on completed visits opens the consultation record
+  // (rendered by consultation.php) in a modal, same as Medical Records.
+  var viewRecordModal = document.getElementById('viewRecordModal');
+  var viewRecordContent = document.getElementById('viewRecordContent');
+  document.querySelectorAll('[data-view-record]').forEach(function (trigger) {
+    trigger.addEventListener('click', function () {
+      viewRecordContent.innerHTML = '<p class="admin-empty">Loading…</p>';
+      window.hqOpenModal(viewRecordModal);
+      fetch('<?= HQ_BASE_URL ?>/patient/consultation.php?appointment_id=' + encodeURIComponent(trigger.getAttribute('data-view-record')), { headers: { 'X-Requested-With': 'fetch' } })
+        .then(function (res) { return res.text(); })
+        .then(function (html) { viewRecordContent.innerHTML = html; })
+        .catch(function () {
+          viewRecordContent.innerHTML = '<p class="form-message error" role="alert">We could not load this record. Please try again.</p>';
+        });
+    });
+  });
+  viewRecordContent.addEventListener('submit', function (e) {
+    if (!e.target.matches('.consultation-feedback-form')) return;
+    e.preventDefault();
+    var form = e.target;
+    fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.text(); })
+      .then(function (html) { viewRecordContent.innerHTML = html; })
+      .catch(function () {
+        var err = document.createElement('p');
+        err.className = 'form-message error';
+        err.textContent = 'We could not save your feedback. Please try again.';
+        form.prepend(err);
+      });
+  });
 })();
 </script>
 
