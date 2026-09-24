@@ -64,6 +64,7 @@ $hqIsAdminLayout = $hqUser && in_array($hqUser['RoleName'], $hqSidebarRoles, tru
           ['file' => 'appointments.php',   'label' => 'Appointments',         'icon' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15l2 2 4-4"/>'],
           ['file' => 'queue.php',          'label' => 'Queue Management',      'icon' => '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>'],
           ['file' => 'physicians.php',     'label' => 'Physicians',            'icon' => '<path d="M9 2v5a3 3 0 0 0 6 0V2"/><path d="M12 13v3"/><circle cx="12" cy="18" r="3"/>'],
+          ['file' => 'announcements.php',  'label' => 'Announcements',         'icon' => '<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>'],
           ['file' => 'notifications.php',  'label' => 'Notifications',         'icon' => '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>'],
           ['file' => 'profile.php',        'label' => 'Profile',               'icon' => $hqIconProfile],
       ],

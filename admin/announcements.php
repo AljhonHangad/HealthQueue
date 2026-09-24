@@ -2,6 +2,7 @@
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/audit.php';
+require_once __DIR__ . '/../includes/announcements.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Admin']);
@@ -10,8 +11,10 @@ $user = currentUser();
 $pdo = getDbConnection();
 $errors = [];
 $flash = '';
-$values = ['title' => '', 'message' => '', 'audience' => 'Everyone'];
+$values = ['title' => '', 'message' => '', 'audience' => 'Everyone', 'clinic_id' => '', 'category' => 'General', 'affects_date' => ''];
 $audiences = ['Everyone', 'Patients', 'Staff', 'Physicians'];
+$categories = ANNOUNCEMENT_CATEGORIES;
+$clinicOptions = $pdo ? $pdo->query("SELECT ClinicID, ClinicName FROM Clinic WHERE archived = 0 ORDER BY ClinicName")->fetchAll(PDO::FETCH_KEY_PAIR) : [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
@@ -22,19 +25,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $values['title'] = trim((string) ($_POST['title'] ?? ''));
         $values['message'] = trim((string) ($_POST['message'] ?? ''));
         $values['audience'] = (string) ($_POST['audience'] ?? 'Everyone');
+        $values['clinic_id'] = (string) ($_POST['clinic_id'] ?? '');
+        $values['category'] = (string) ($_POST['category'] ?? 'General');
+        $values['affects_date'] = trim((string) ($_POST['affects_date'] ?? ''));
 
         if ($values['title'] === '') $errors[] = 'Title is required.';
         if ($values['message'] === '') $errors[] = 'Message is required.';
         if (!in_array($values['audience'], $audiences, true)) $errors[] = 'Please choose a valid audience.';
+        if (!in_array($values['category'], $categories, true)) $errors[] = 'Please choose a valid category.';
+        if ($values['clinic_id'] !== '' && !isset($clinicOptions[(int) $values['clinic_id']])) $errors[] = 'Please choose a valid clinic.';
+        if ($values['affects_date'] !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $values['affects_date'])) $errors[] = 'Please enter a valid affected date.';
+        if ($values['affects_date'] !== '' && $values['clinic_id'] === '') $errors[] = 'An affected date only applies to a clinic announcement -- choose the clinic it is from.';
+
+        $photo = null;
+        if (!$errors) {
+            [$photo, $photoError] = saveAnnouncementPhoto($_FILES['photo'] ?? null);
+            if ($photoError) $errors[] = $photoError;
+        }
 
         if (!$errors) {
             try {
-                $stmt = $pdo->prepare('INSERT INTO Announcements (PostedByUserID, Title, Message, Audience) VALUES (?, ?, ?, ?)');
-                $stmt->execute([$user['UserID'], $values['title'], $values['message'], $values['audience']]);
+                $stmt = $pdo->prepare('INSERT INTO Announcements (PostedByUserID, ClinicID, Title, Category, Message, PhotoPath, Audience, AffectsDate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+                $stmt->execute([$user['UserID'], $values['clinic_id'] !== '' ? (int) $values['clinic_id'] : null, $values['title'], $values['category'], $values['message'], $photo, $values['audience'], $values['affects_date'] ?: null]);
                 logActivity($pdo, $user['UserID'], null, 'Posted announcement', $values['title'] . ' (' . $values['audience'] . ')');
                 header('Location: ' . HQ_BASE_URL . '/admin/announcements.php');
                 exit;
             } catch (PDOException $e) {
+                deleteAnnouncementPhoto($photo);
                 error_log('Announcement save failed: ' . $e->getMessage());
                 $errors[] = 'We could not post this announcement.';
             }
@@ -46,8 +63,8 @@ $announcements = [];
 if ($pdo) {
     try {
         $announcements = $pdo->query(
-            "SELECT a.AnnouncementID, a.Title, a.Message, a.Audience, a.CreatedAt, u.FirstName, u.LastName
-             FROM Announcements a JOIN Users u ON u.UserID = a.PostedByUserID
+            "SELECT a.AnnouncementID, a.Title, a.Category, a.Message, a.PhotoPath, a.Audience, a.AffectsDate, a.CreatedAt, u.FirstName, u.LastName, c.ClinicName
+             FROM Announcements a JOIN Users u ON u.UserID = a.PostedByUserID LEFT JOIN Clinic c ON c.ClinicID = a.ClinicID
              ORDER BY a.CreatedAt DESC LIMIT 30"
         )->fetchAll();
     } catch (PDOException $e) {
@@ -68,7 +85,7 @@ require __DIR__ . '/../includes/header.php';
 
   <section class="admin-section">
     <div class="portal-heading"><div><span class="section-kicker">New announcement</span><h2>Post an update</h2></div></div>
-    <form class="registration-form" method="post" style="max-width:640px;">
+    <form class="registration-form" method="post" enctype="multipart/form-data" style="max-width:640px;">
       <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
       <div class="form-stack">
         <label>Title<input name="title" value="<?= htmlspecialchars($values['title']) ?>" required></label>
@@ -79,7 +96,28 @@ require __DIR__ . '/../includes/header.php';
             <?php endforeach; ?>
           </select>
         </label>
+      </div>
+      <div class="form-stack form-cols-2">
+        <label>From
+          <select name="clinic_id">
+            <option value="">HealthQueue (platform-wide)</option>
+            <?php foreach ($clinicOptions as $optId => $optName): ?>
+              <option value="<?= (int) $optId ?>" <?= $values['clinic_id'] === (string) $optId ? 'selected' : '' ?>><?= htmlspecialchars($optName) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </label>
+        <label>Category
+          <select name="category">
+            <?php foreach ($categories as $category): ?>
+              <option <?= $values['category'] === $category ? 'selected' : '' ?>><?= htmlspecialchars($category) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </label>
+      </div>
+      <div class="form-stack">
+        <label>Affects appointments on <span class="optional">(optional -- patients booked at this clinic on this date see it pinned)</span><input type="date" name="affects_date" value="<?= htmlspecialchars($values['affects_date']) ?>"></label>
         <label>Message<textarea name="message" rows="4" required><?= htmlspecialchars($values['message']) ?></textarea></label>
+        <label>Photo <span class="optional">(optional -- JPG, PNG, WEBP, or GIF, 5 MB max)</span><input type="file" name="photo" accept="image/jpeg,image/png,image/webp,image/gif"></label>
       </div>
       <button type="submit" class="btn btn-primary btn-block">Post announcement</button>
     </form>
@@ -94,7 +132,8 @@ require __DIR__ . '/../includes/header.php';
             <div>
               <h3><?= htmlspecialchars($announcement['Title']) ?></h3>
               <p><?= nl2br(htmlspecialchars($announcement['Message'])) ?></p>
-              <span>Posted by <?= htmlspecialchars($announcement['FirstName'] . ' ' . $announcement['LastName']) ?> &middot; <?= htmlspecialchars(date('M j, Y g:i A', strtotime($announcement['CreatedAt']))) ?></span>
+              <?php if ($announcement['PhotoPath']): ?><img src="<?= htmlspecialchars(announcementPhotoUrl($announcement['PhotoPath'])) ?>" alt="" class="an-admin-photo"><?php endif; ?>
+              <span><?= htmlspecialchars($announcement['ClinicName'] ?: 'HealthQueue') ?> &middot; <?= htmlspecialchars($announcement['Category']) ?><?= $announcement['AffectsDate'] ? ' &middot; affects ' . htmlspecialchars(date('M j, Y', strtotime($announcement['AffectsDate']))) : '' ?> &middot; Posted by <?= htmlspecialchars($announcement['FirstName'] . ' ' . $announcement['LastName']) ?> &middot; <?= htmlspecialchars(date('M j, Y g:i A', strtotime($announcement['CreatedAt']))) ?></span>
             </div>
             <span class="status-badge status-active"><?= htmlspecialchars($announcement['Audience']) ?></span>
           </article>

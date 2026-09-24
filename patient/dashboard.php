@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/announcements.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -12,6 +13,7 @@ $clinics = [];
 $records = [];
 $unpaidCount = 0;
 $queueEntries = [];
+$announcements = [];
 $minutesPerPatient = 15;
 $dataError = null;
 
@@ -54,13 +56,23 @@ if ($pdo) {
 
         foreach ($queueEntries as &$queueEntry) {
             $posStmt = $pdo->prepare(
-                "SELECT COUNT(*) FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND Status = 'Waiting' AND QueueNumber < ?"
+                "SELECT COUNT(*) FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND Status = 'Waiting' AND COALESCE(Position, QueueNumber * 10) < (SELECT COALESCE(me.Position, me.QueueNumber * 10) FROM Queue me WHERE me.ClinicID = Queue.ClinicID AND DATE(me.CreatedAt) = CURDATE() AND me.QueueNumber = ? ORDER BY me.QueueID DESC LIMIT 1)"
             );
             $posStmt->execute([$queueEntry['ClinicID'], $queueEntry['QueueNumber']]);
             $queueEntry['AheadCount'] = (int) $posStmt->fetchColumn();
             $queueEntry['EstimatedWaitMinutes'] = $queueEntry['Status'] === 'Waiting' ? $queueEntry['AheadCount'] * $minutesPerPatient : 0;
         }
         unset($queueEntry);
+
+        $annStmt = $pdo->prepare(
+            "SELECT a.AnnouncementID, a.Title, a.Category, a.Message, a.PhotoPath, a.AffectsDate, a.CreatedAt, c.ClinicName
+             FROM Announcements a LEFT JOIN Clinic c ON c.ClinicID = a.ClinicID
+             WHERE a.Audience IN ('Everyone', 'Patients')
+               AND NOT EXISTS (SELECT 1 FROM AnnouncementDismissals d WHERE d.UserID = ? AND d.AnnouncementID = a.AnnouncementID)
+             ORDER BY a.CreatedAt DESC LIMIT 3"
+        );
+        $annStmt->execute([$user['UserID']]);
+        $announcements = $annStmt->fetchAll();
     } catch (PDOException $e) {
         error_log('Patient dashboard failed: ' . $e->getMessage());
         $dataError = 'Your appointment information is temporarily unavailable.';
@@ -77,6 +89,7 @@ require __DIR__ . '/../includes/header.php';
     <h1>Good day, <?= htmlspecialchars($user['FirstName']) ?></h1>
     <button type="button" class="btn btn-primary" data-modal-open="bookNowModal">Book Now</button>
   </div>
+  <?php if (isset($_GET['dismissed'])): ?><p class="form-message success" role="status">Announcement deleted.</p><?php endif; ?>
   <?php if (isset($_GET['booked'])): ?><p class="form-message success" role="status">Your appointment request was submitted. The clinic will confirm it soon.</p><?php endif; ?>
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
   <?php if ($unpaidCount > 0): ?><p class="form-message error" role="alert">You have <?= $unpaidCount ?> request(s) awaiting payment. <a href="<?= HQ_BASE_URL ?>/patient/my-appointments.php">Complete payment to send them to the clinic &rarr;</a></p><?php endif; ?>
@@ -123,10 +136,41 @@ require __DIR__ . '/../includes/header.php';
           </div>
         <?php endif; ?>
 
-        <div class="clock-card">
-          <div class="clock-day" id="dashClockDay"></div>
-          <div class="clock-time" id="dashClockTime"></div>
-          <div class="clock-date" id="dashClockDate"></div>
+        <div class="dash-announcements">
+          <div class="dash-announcements-head">
+            <span class="queue-hero-label">Announcements</span>
+            <a href="<?= HQ_BASE_URL ?>/patient/announcements.php" class="text-link">View all <span>&rarr;</span></a>
+          </div>
+          <?php if ($announcements): ?>
+            <ul>
+              <?php foreach ($announcements as $note): ?>
+                <li>
+                  <a href="<?= HQ_BASE_URL ?>/patient/announcements.php?open=<?= (int) $note['AnnouncementID'] ?>" data-dash-announcement
+                     data-id="<?= (int) $note['AnnouncementID'] ?>"
+                     data-title="<?= htmlspecialchars($note['Title'], ENT_QUOTES) ?>"
+                     data-source="<?= htmlspecialchars($note['ClinicName'] ?: 'HealthQueue', ENT_QUOTES) ?>"
+                     data-category="<?= htmlspecialchars($note['Category'], ENT_QUOTES) ?>"
+                     data-posted="<?= htmlspecialchars(date('l, F j, Y · g:i A', strtotime($note['CreatedAt'])), ENT_QUOTES) ?>"
+                     data-affects="<?= $note['AffectsDate'] ? htmlspecialchars(date('l, F j, Y', strtotime($note['AffectsDate'])), ENT_QUOTES) : '' ?>"
+                     data-photo="<?= htmlspecialchars((string) announcementPhotoUrl($note['PhotoPath']), ENT_QUOTES) ?>"
+                     data-message="<?= htmlspecialchars($note['Message'], ENT_QUOTES) ?>">
+                    <strong><?= htmlspecialchars($note['Title']) ?></strong>
+                    <p><?= htmlspecialchars(mb_strimwidth(preg_replace('/\s+/', ' ', $note['Message']), 0, 90, '…')) ?></p>
+                    <span><?= htmlspecialchars(date('M j, Y · g:i A', strtotime($note['CreatedAt']))) ?></span>
+                  </a>
+                  <form method="post" action="<?= HQ_BASE_URL ?>/patient/announcements.php" class="dash-ann-delete" onsubmit="return confirm('Delete this announcement? It will be removed from your list only.');">
+                    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+                    <input type="hidden" name="form_type" value="dismiss_announcement">
+                    <input type="hidden" name="return_to" value="dashboard">
+                    <input type="hidden" name="announcement_id" value="<?= (int) $note['AnnouncementID'] ?>">
+                    <button type="submit" aria-label="Delete announcement" title="Delete"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button>
+                  </form>
+                </li>
+              <?php endforeach; ?>
+            </ul>
+          <?php else: ?>
+            <p class="dash-announcements-empty">No announcements right now.</p>
+          <?php endif; ?>
         </div>
       </div>
 
@@ -142,6 +186,31 @@ require __DIR__ . '/../includes/header.php';
 </div></main>
 
 <?php require __DIR__ . '/../includes/booking-modal.php'; ?>
+
+<div class="modal-overlay" id="dashAnnouncementModal">
+  <div class="modal-box an-modal" role="dialog" aria-modal="true" aria-labelledby="dashAnnTitle">
+    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
+    <div class="an-modal-head">
+      <div>
+        <span class="an-modal-source" id="dashAnnSource"></span>
+        <span class="an-pill an-pill-slate" id="dashAnnCategory"></span>
+      </div>
+    </div>
+    <img class="an-modal-photo" id="dashAnnPhoto" alt="" hidden>
+    <h2 id="dashAnnTitle"></h2>
+    <p class="an-modal-posted" id="dashAnnPosted"></p>
+    <p class="an-modal-affects" id="dashAnnAffects" hidden></p>
+    <div class="an-modal-message" id="dashAnnMessage"></div>
+    <form method="post" action="<?= HQ_BASE_URL ?>/patient/announcements.php" class="an-modal-actions" onsubmit="return confirm('Delete this announcement? It will be removed from your list only.');">
+      <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+      <input type="hidden" name="form_type" value="dismiss_announcement">
+      <input type="hidden" name="return_to" value="dashboard">
+      <input type="hidden" name="announcement_id" id="dashAnnId" value="">
+      <button type="submit" class="btn btn-outline ma-danger">Delete</button>
+      <button type="button" class="btn btn-primary" data-modal-close>Close</button>
+    </form>
+  </div>
+</div>
 
 <div class="modal-overlay" id="queueDetailModal">
   <div class="modal-box">
@@ -167,25 +236,30 @@ require __DIR__ . '/../includes/header.php';
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  var dashClockDay = document.getElementById('dashClockDay');
-  var dashClockTime = document.getElementById('dashClockTime');
-  var dashClockDate = document.getElementById('dashClockDate');
-  if (dashClockDay && dashClockTime && dashClockDate) {
-    var dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    var monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-    var updateClock = function () {
-      var now = new Date();
-      var hours24 = now.getHours();
-      var ampm = hours24 >= 12 ? 'PM' : 'AM';
-      var hours12 = hours24 % 12 || 12;
-      var minutes = String(now.getMinutes()).padStart(2, '0');
-      dashClockDay.textContent = dayNames[now.getDay()];
-      dashClockTime.innerHTML = hours12 + ':' + minutes + ' <sup>' + ampm + '</sup>';
-      dashClockDate.textContent = monthNames[now.getMonth()] + ' ' + now.getDate() + ', ' + now.getFullYear();
-    };
-    updateClock();
-    setInterval(updateClock, 30000);
-  }
+  // Dashboard announcements open in a modal (the link is a no-JS fallback).
+  var annModal = document.getElementById('dashAnnouncementModal');
+  var annPills = { 'Closure': 'an-pill-red', 'Schedule change': 'an-pill-amber', 'Event': 'an-pill-green', 'Health advisory': 'an-pill-blue' };
+  document.querySelectorAll('[data-dash-announcement]').forEach(function (link) {
+    link.addEventListener('click', function (e) {
+      e.preventDefault();
+      var d = link.dataset;
+      document.getElementById('dashAnnSource').textContent = d.source;
+      var pill = document.getElementById('dashAnnCategory');
+      pill.textContent = d.category;
+      pill.className = 'an-pill ' + (annPills[d.category] || 'an-pill-slate');
+      var photo = document.getElementById('dashAnnPhoto');
+      photo.hidden = !d.photo;
+      if (d.photo) photo.src = d.photo;
+      document.getElementById('dashAnnTitle').textContent = d.title;
+      document.getElementById('dashAnnPosted').textContent = 'Posted ' + d.posted;
+      var affects = document.getElementById('dashAnnAffects');
+      affects.hidden = !d.affects;
+      affects.textContent = 'Affects appointments on ' + d.affects;
+      document.getElementById('dashAnnMessage').textContent = d.message;
+      document.getElementById('dashAnnId').value = d.id;
+      window.hqOpenModal(annModal);
+    });
+  });
 
   var queueDetailModal = document.getElementById('queueDetailModal');
   function openQueueDetail(card) {

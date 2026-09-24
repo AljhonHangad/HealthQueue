@@ -239,106 +239,72 @@ window.hqInitCalendar = function (container, hiddenInput, onSelect) {
   render();
 };
 
-// Notification rows: tap to expand the message in place, long-press to
-// enter multi-select mode (mobile-app style) and delete the selected ones.
+// Notification rows: tap a row to expand its message; tick checkboxes to
+// choose which ones to delete ("Select all" + "Delete selected").
 document.addEventListener('DOMContentLoaded', function () {
-  var LONG_PRESS_MS = 500;
-
   document.querySelectorAll('.notification-list').forEach(function (list) {
     var form = list.closest('form');
-    var bar = list.querySelector('.notification-selection-bar');
-    var countEl = bar ? bar.querySelector('.notification-selection-count') : null;
-    var deleteBtn = bar ? bar.querySelector('.notification-delete-selected') : null;
-    var cancelBtn = bar ? bar.querySelector('.notification-cancel-selection') : null;
-    var selected = new Set();
+    if (!form) return;
+    var boxes = Array.prototype.slice.call(list.querySelectorAll('.notif-check'));
+    var selectAll = form.querySelector('.notif-select-all');
+    var deleteBtn = form.querySelector('.notification-delete-selected');
+    var countEl = form.querySelector('.notification-selection-count');
 
-    function updateBar() {
-      if (!bar) return;
-      bar.hidden = selected.size === 0;
-      if (countEl) countEl.textContent = String(selected.size);
+    function update() {
+      var checked = boxes.filter(function (box) { return box.checked; }).length;
+      boxes.forEach(function (box) { box.closest('.notification-row').classList.toggle('is-selected', box.checked); });
+      if (countEl) countEl.textContent = String(checked);
+      if (deleteBtn) deleteBtn.disabled = checked === 0;
+      if (selectAll) {
+        selectAll.checked = checked > 0 && checked === boxes.length;
+        selectAll.indeterminate = checked > 0 && checked < boxes.length;
+      }
     }
 
-    function clearSelection() {
-      selected.clear();
-      list.querySelectorAll('.notification-row.is-selected').forEach(function (row) {
-        row.classList.remove('is-selected');
+    boxes.forEach(function (box) { box.addEventListener('change', update); });
+    if (selectAll) {
+      selectAll.addEventListener('change', function () {
+        boxes.forEach(function (box) { box.checked = selectAll.checked; });
+        update();
       });
-      updateBar();
     }
 
-    function toggleSelect(row) {
-      var id = row.getAttribute('data-id');
-      if (selected.has(id)) {
-        selected.delete(id);
-        row.classList.remove('is-selected');
-      } else {
-        selected.add(id);
-        row.classList.add('is-selected');
-      }
-      updateBar();
-    }
-
-    function toggleExpand(row) {
-      var msg = row.querySelector('.notif-message');
-      if (msg) msg.classList.toggle('expanded');
-    }
-
+    // Clicking the row (but not its checkbox or buttons) opens it: the full
+    // message plus a "Delete notification" button for just that one.
     list.querySelectorAll('.notification-row').forEach(function (row) {
-      var timer = null;
-      var longPressed = false;
+      row.addEventListener('click', function (e) {
+        if (e.target.closest('.notif-check-wrap, .notif-row-actions')) return;
+        var open = row.classList.toggle('is-open');
+        var msg = row.querySelector('.notif-message');
+        if (msg) msg.classList.toggle('expanded', open);
+      });
+    });
 
-      function start() {
-        longPressed = false;
-        timer = setTimeout(function () {
-          longPressed = true;
-          if (navigator.vibrate) navigator.vibrate(15);
-          toggleSelect(row);
-        }, LONG_PRESS_MS);
-      }
-      function stopTimer() {
-        clearTimeout(timer);
-      }
-      function end() {
-        stopTimer();
-        if (longPressed) return;
-        if (selected.size > 0) {
-          toggleSelect(row);
-        } else {
-          toggleExpand(row);
-        }
-      }
-
-      row.addEventListener('mousedown', start);
-      row.addEventListener('touchstart', start, { passive: true });
-      row.addEventListener('mouseup', end);
-      row.addEventListener('touchend', end);
-      row.addEventListener('mouseleave', stopTimer);
-      row.addEventListener('touchmove', stopTimer);
-      row.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    list.querySelectorAll('[data-delete-id]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (!confirm('Delete this notification?')) return;
+        // Only this one -- untick anything else so it isn't deleted too.
+        boxes.forEach(function (box) { box.checked = false; });
+        [['notification_ids[]', btn.getAttribute('data-delete-id')], ['form_type', 'delete_selected']].forEach(function (pair) {
+          var input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = pair[0];
+          input.value = pair[1];
+          form.appendChild(input);
+        });
+        form.submit();
+      });
     });
 
     if (deleteBtn) {
-      deleteBtn.addEventListener('click', function () {
-        if (!form || selected.size === 0) return;
-        if (!confirm('Delete ' + selected.size + ' selected notification(s)?')) return;
-        selected.forEach(function (id) {
-          var input = document.createElement('input');
-          input.type = 'hidden';
-          input.name = 'notification_ids[]';
-          input.value = id;
-          form.appendChild(input);
-        });
-        var typeInput = document.createElement('input');
-        typeInput.type = 'hidden';
-        typeInput.name = 'form_type';
-        typeInput.value = 'delete_selected';
-        form.appendChild(typeInput);
-        form.submit();
+      deleteBtn.addEventListener('click', function (e) {
+        var checked = boxes.filter(function (box) { return box.checked; }).length;
+        if (!checked || !confirm('Delete ' + checked + ' selected notification' + (checked === 1 ? '' : 's') + '?')) {
+          e.preventDefault();
+        }
       });
     }
 
-    if (cancelBtn) {
-      cancelBtn.addEventListener('click', clearSelection);
-    }
+    update();
   });
 });

@@ -95,7 +95,7 @@ if ($pdo) {
         $entries = $stmt->fetchAll();
 
         $aheadStmt = $pdo->prepare(
-            "SELECT COUNT(*) FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND Status = 'Waiting' AND QueueNumber < ?"
+            "SELECT COUNT(*) FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND Status = 'Waiting' AND COALESCE(Position, QueueNumber * 10) < (SELECT COALESCE(me.Position, me.QueueNumber * 10) FROM Queue me WHERE me.ClinicID = Queue.ClinicID AND DATE(me.CreatedAt) = CURDATE() AND me.QueueNumber = ? ORDER BY me.QueueID DESC LIMIT 1)"
         );
         $servingStmt = $pdo->prepare(
             "SELECT MAX(QueueNumber) FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND Status IN ('Calling', 'Serving')"

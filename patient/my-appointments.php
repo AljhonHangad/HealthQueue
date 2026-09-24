@@ -124,7 +124,7 @@ if ($pdo) {
 
         $statusFilter = $tabs[$activeTab][1];
         $stmt = $pdo->prepare(
-            "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.Status, a.BookingFeePaid, a.CancellationReason,
+            "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.Status, a.BookingFeePaid, a.CancellationReason, a.DeclineReason,
                     TIMESTAMPDIFF(MINUTE, a.CreatedAt, NOW()) AS MinutesSinceRequest,
                     c.ClinicName, c.Address, c.BaseConsultationFee,
                     phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName,
@@ -161,7 +161,7 @@ if ($pdo) {
         if ($activeQueue) {
             $posStmt = $pdo->prepare(
                 "SELECT COUNT(*) AS Total, COALESCE(SUM(Status = 'Waiting'), 0) AS Ahead
-                 FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND QueueNumber < ? AND Status <> 'Removed'"
+                 FROM Queue WHERE ClinicID = ? AND DATE(CreatedAt) = CURDATE() AND COALESCE(Position, QueueNumber * 10) < (SELECT COALESCE(me.Position, me.QueueNumber * 10) FROM Queue me WHERE me.ClinicID = Queue.ClinicID AND DATE(me.CreatedAt) = CURDATE() AND me.QueueNumber = ? ORDER BY me.QueueID DESC LIMIT 1) AND Status <> 'Removed'"
             );
             $posStmt->execute([$activeQueue['ClinicID'], $activeQueue['QueueNumber']]);
             $pos = $posStmt->fetch();
@@ -295,7 +295,7 @@ require __DIR__ . '/../includes/header.php';
                   $meta[] = $appt['TodayQueueNumber'] ? 'queue #' . (int) $appt['TodayQueueNumber'] : ($doctor ?: 'physician to be assigned');
                   break;
               case 'Cancelled':
-                  $meta[] = $appt['CancellationReason'] ?: 'Declined by the clinic';
+                  $meta[] = $appt['DeclineReason'] ?: ($appt['CancellationReason'] ?: 'Declined by the clinic');
                   break;
               case 'Completed':
                   if ($doctor) $meta[] = $doctor;
@@ -303,7 +303,7 @@ require __DIR__ . '/../includes/header.php';
           }
           // Staff rejections leave CancellationReason empty; patient
           // cancellations always record one.
-          $isDeclined = $appt['Status'] === 'Cancelled' && !$appt['CancellationReason'];
+          $isDeclined = $appt['Status'] === 'Cancelled' && ($appt['DeclineReason'] || !$appt['CancellationReason']);
           if ($appt['Status'] === 'Cancelled') {
               [$pillLabel, $pillClass] = [$isDeclined ? 'Declined' : 'Cancelled', 'ma-pill-declined'];
           } else {

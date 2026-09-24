@@ -3,6 +3,7 @@ require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/audit.php';
 require_once __DIR__ . '/../includes/notifications.php';
+require_once __DIR__ . '/../includes/wallet.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Staff']);
@@ -78,23 +79,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'We could not accept this request.';
             }
         } elseif ($formType === 'reject_request') {
+            // Reason is chosen from chips ("Fully booked", ...) or typed under
+            // "Other"; it's shown to the patient. Optional so the dashboard's
+            // quick Decline still works.
+            $declineReason = trim((string) ($_POST['decline_reason'] ?? ''));
+            if ($declineReason === 'Other') $declineReason = trim((string) ($_POST['decline_reason_other'] ?? ''));
+            $declineReason = mb_substr($declineReason, 0, 255);
             try {
-                $patientStmt = $pdo->prepare('SELECT PatientID FROM Appointments WHERE AppointmentID = ? AND ClinicID = ?');
-                $patientStmt->execute([$appointmentId, $clinicId]);
-                $patientId = (int) $patientStmt->fetchColumn();
+                $pdo->beginTransaction();
+                $lookup = $pdo->prepare(
+                    "SELECT a.PatientID, a.BookingFeePaid, c.ClinicName, c.BaseConsultationFee
+                     FROM Appointments a JOIN Clinic c ON c.ClinicID = a.ClinicID
+                     WHERE a.AppointmentID = ? AND a.ClinicID = ? AND a.Status = 'Pending' FOR UPDATE"
+                );
+                $lookup->execute([$appointmentId, $clinicId]);
+                $target = $lookup->fetch();
 
-                $stmt = $pdo->prepare("UPDATE Appointments SET Status = 'Cancelled' WHERE AppointmentID = ? AND ClinicID = ? AND Status = 'Pending'");
-                $stmt->execute([$appointmentId, $clinicId]);
-                if ($stmt->rowCount()) {
-                    logActivity($pdo, $user['UserID'], $clinicId, 'Rejected appointment request', "Appointment #{$appointmentId}");
-                    if ($patientId) notifyPatient($pdo, $patientId, 'Your appointment request was declined by the clinic.', $appointmentId);
-                    $flash = 'Appointment request rejected.';
-                } else {
+                if (!$target) {
+                    $pdo->rollBack();
                     $errors[] = 'That request could not be found.';
+                } else {
+                    $pdo->prepare("UPDATE Appointments SET Status = 'Cancelled', DeclineReason = ? WHERE AppointmentID = ? AND ClinicID = ?")
+                        ->execute([$declineReason !== '' ? $declineReason : 'Declined by the clinic', $appointmentId, $clinicId]);
+                    // A paid booking fee goes back to the patient's wallet.
+                    $refund = $target['BookingFeePaid'] ? round((float) $target['BaseConsultationFee'], 2) : 0.0;
+                    if ($refund > 0) {
+                        walletRefund($pdo, (int) $target['PatientID'], $refund, $appointmentId, 'Refund for declined request at ' . $target['ClinicName']);
+                    }
+                    $pdo->commit();
+
+                    logActivity($pdo, $user['UserID'], $clinicId, 'Declined appointment request', "Appointment #{$appointmentId}" . ($declineReason !== '' ? " ({$declineReason})" : ''));
+                    notifyPatient(
+                        $pdo,
+                        (int) $target['PatientID'],
+                        'Your appointment request was declined by the clinic' . ($declineReason !== '' ? ": {$declineReason}." : '.')
+                            . ($refund > 0 ? ' PHP ' . number_format($refund, 2) . ' was refunded to your wallet.' : ''),
+                        $appointmentId
+                    );
+                    $flash = 'Request declined' . ($refund > 0 ? ' and ₱' . number_format($refund) . ' refunded to the patient.' : '.');
                 }
-            } catch (PDOException $e) {
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Reject request failed: ' . $e->getMessage());
-                $errors[] = 'We could not reject this request.';
+                $errors[] = 'We could not decline this request.';
             }
         } elseif ($formType === 'reschedule_request') {
             $newDate = trim((string) ($_POST['appointment_date'] ?? ''));
@@ -156,45 +183,108 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+
+    // Approve/Decline buttons on the staff dashboard post here and go back.
+    if (($_POST['return_to'] ?? '') === 'dashboard') {
+        $_SESSION['dashboard_flash'] = $errors ? ['error', implode(' ', $errors)] : ['success', $flash];
+        header('Location: ' . HQ_BASE_URL . '/staff/dashboard.php');
+        exit;
+    }
 }
 
+$tabs = ['requests' => 'Requests', 'today' => 'Today', 'confirm' => 'To confirm', 'all' => 'All'];
+$activeTab = isset($tabs[$_GET['tab'] ?? '']) ? $_GET['tab'] : 'requests';
+$search = trim((string) ($_GET['q'] ?? ''));
+$dateFilter = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) ($_GET['date'] ?? '')) ? $_GET['date'] : '';
+$declineReasons = ['Fully booked', 'Physician unavailable', 'Other'];
+
 $requests = [];
-$physicians = [];
+$todayList = [];
 $pendingConfirmations = [];
+$allList = [];
+$physicians = [];
+$physicianSchedule = [];
+$tabCounts = array_fill_keys(array_keys($tabs), 0);
+$today = null;
 $dataError = null;
 
 if ($pdo && $clinicId) {
     try {
+        $today = (string) $pdo->query('SELECT CURDATE()')->fetchColumn();
+        $listDate = $dateFilter ?: $today;
+
+        // Shared search/date filters for the Requests and All lists.
+        $filterSql = '';
+        $filterParams = [];
+        if ($search !== '') {
+            $filterSql .= " AND CONCAT(pat.FirstName, ' ', pat.LastName) LIKE ?";
+            $filterParams[] = '%' . $search . '%';
+        }
+        if ($dateFilter !== '') {
+            $filterSql .= ' AND a.AppointmentDate = ?';
+            $filterParams[] = $dateFilter;
+        }
+
         $stmt = $pdo->prepare(
-            "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.PhysicianID,
-                    pat.UserID AS PatientUserID, pat.FirstName, pat.LastName, pat.Email, pat.ContactNumber, pat.CreatedAt AS PatientSince,
-                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName
+            "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.PhysicianID, a.BookingFeePaid,
+                    TIMESTAMPDIFF(MINUTE, a.CreatedAt, NOW()) AS MinutesAgo,
+                    pat.UserID AS PatientUserID, pat.FirstName, pat.LastName, pat.Email, pat.ContactNumber,
+                    c.BaseConsultationFee,
+                    (SELECT COUNT(*) FROM Appointments h WHERE h.PatientID = a.PatientID AND h.ClinicID = a.ClinicID) AS VisitCount
+             FROM Appointments a
+             JOIN Users pat ON pat.UserID = a.PatientID
+             JOIN Clinic c ON c.ClinicID = a.ClinicID
+             WHERE a.ClinicID = ? AND a.Status = 'Pending' AND a.BookingFeePaid = 1{$filterSql}
+             ORDER BY a.AppointmentDate, a.AppointmentTime"
+        );
+        $stmt->execute(array_merge([$clinicId], $filterParams));
+        $requests = $stmt->fetchAll();
+
+        $physStmt = $pdo->prepare(
+            "SELECT UserID, FirstName, LastName, AvailabilityStatus FROM Users
+             WHERE ClinicID = ? AND RoleID = (SELECT RoleID FROM Roles WHERE RoleName = 'Physician') AND Status = 'Active'
+             ORDER BY LastName"
+        );
+        $physStmt->execute([$clinicId]);
+        $physicians = $physStmt->fetchAll();
+
+        // Each physician's weekly schedule (ISO weekdays), used to warn when a
+        // request is assigned to someone who doesn't work that day.
+        $schedStmt = $pdo->prepare(
+            "SELECT pa.PhysicianID, pa.DayOfWeek FROM PhysicianAvailability pa
+             JOIN Users u ON u.UserID = pa.PhysicianID WHERE u.ClinicID = ?"
+        );
+        $schedStmt->execute([$clinicId]);
+        foreach ($physicians as $physician) {
+            $physicianSchedule[(int) $physician['UserID']] = [
+                'name'   => 'Dr. ' . $physician['LastName'],
+                'status' => $physician['AvailabilityStatus'],
+                'days'   => [],
+            ];
+        }
+        foreach ($schedStmt->fetchAll() as $slot) {
+            if (isset($physicianSchedule[(int) $slot['PhysicianID']])) {
+                $physicianSchedule[(int) $slot['PhysicianID']]['days'][] = (int) $slot['DayOfWeek'];
+            }
+        }
+
+        $todayStmt = $pdo->prepare(
+            "SELECT a.AppointmentID, a.AppointmentTime, a.Concern, a.Status, a.BookingFeePaid,
+                    pat.FirstName, pat.LastName, phy.LastName AS PhyLastName,
+                    (SELECT q.QueueNumber FROM Queue q WHERE q.AppointmentID = a.AppointmentID ORDER BY q.CreatedAt DESC LIMIT 1) AS QueueNumber,
+                    (SELECT q.Status FROM Queue q WHERE q.AppointmentID = a.AppointmentID ORDER BY q.CreatedAt DESC LIMIT 1) AS QueueStatus
              FROM Appointments a
              JOIN Users pat ON pat.UserID = a.PatientID
              LEFT JOIN Users phy ON phy.UserID = a.PhysicianID
-             WHERE a.ClinicID = ? AND a.Status = 'Pending' AND a.BookingFeePaid = 1
-             ORDER BY a.AppointmentDate, a.AppointmentTime"
+             WHERE a.ClinicID = ? AND a.AppointmentDate = ? AND a.Status IN ('Confirmed', 'Completed')
+             ORDER BY a.AppointmentTime"
         );
-        $stmt->execute([$clinicId]);
-        $requests = $stmt->fetchAll();
-
-        foreach ($requests as &$request) {
-            $historyStmt = $pdo->prepare('SELECT COUNT(*) FROM Appointments WHERE PatientID = ? AND ClinicID = ?');
-            $historyStmt->execute([$request['PatientUserID'], $clinicId]);
-            $request['VisitCount'] = (int) $historyStmt->fetchColumn();
-        }
-        unset($request);
-
-        $physicians = $pdo->query(
-            "SELECT UserID, FirstName, LastName FROM Users
-             WHERE ClinicID = {$clinicId} AND RoleID = (SELECT RoleID FROM Roles WHERE RoleName = 'Physician') AND Status = 'Active'
-             ORDER BY LastName"
-        )->fetchAll();
+        $todayStmt->execute([$clinicId, $listDate]);
+        $todayList = $todayStmt->fetchAll();
 
         $confirmStmt = $pdo->prepare(
             "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime,
-                    pat.FirstName, pat.LastName,
-                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName,
+                    pat.FirstName, pat.LastName, phy.LastName AS PhyLastName,
                     (SELECT v.UpdatedAt FROM ConsultationVersions v
                      JOIN Consultations cons ON cons.ConsultationID = v.ConsultationID
                      WHERE cons.AppointmentID = a.AppointmentID AND v.Status = 'Finalized'
@@ -212,105 +302,279 @@ if ($pdo && $clinicId) {
         );
         $confirmStmt->execute([$clinicId]);
         $pendingConfirmations = $confirmStmt->fetchAll();
+
+        $allStmt = $pdo->prepare(
+            "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.Status, a.BookingFeePaid, a.CancellationReason, a.DeclineReason,
+                    pat.FirstName, pat.LastName, phy.LastName AS PhyLastName
+             FROM Appointments a
+             JOIN Users pat ON pat.UserID = a.PatientID
+             LEFT JOIN Users phy ON phy.UserID = a.PhysicianID
+             WHERE a.ClinicID = ?{$filterSql}
+             ORDER BY a.AppointmentDate DESC, a.AppointmentTime DESC
+             LIMIT 100"
+        );
+        $allStmt->execute(array_merge([$clinicId], $filterParams));
+        $allList = $allStmt->fetchAll();
+
+        $tabCounts = ['requests' => count($requests), 'today' => count($todayList), 'confirm' => count($pendingConfirmations), 'all' => count($allList)];
     } catch (PDOException $e) {
         error_log('Appointments list load failed: ' . $e->getMessage());
         $dataError = 'Appointments are temporarily unavailable.';
     }
 }
 
+$initials = static fn(array $row): string => strtoupper(mb_substr($row['FirstName'], 0, 1) . mb_substr($row['LastName'], 0, 1));
+$timeAgo = static function (int $minutes): string {
+    if ($minutes < 1) return 'just now';
+    if ($minutes < 60) return $minutes . ' min ago';
+    if ($minutes < 1440) {
+        $h = intdiv($minutes, 60);
+        return $h . ' hour' . ($h === 1 ? '' : 's') . ' ago';
+    }
+    $d = intdiv($minutes, 1440);
+    return $d . ' day' . ($d === 1 ? '' : 's') . ' ago';
+};
+$concernLabel = static fn(?string $concern): string => mb_strimwidth(trim((string) $concern) ?: 'General', 0, 32, '…');
+$statusPill = static function (array $row): array {
+    if ($row['Status'] === 'Cancelled') {
+        return !empty($row['DeclineReason']) || empty($row['CancellationReason']) ? ['Declined', 'ma-pill-declined'] : ['Cancelled', 'ma-pill-declined'];
+    }
+    return ['Pending' => ['Pending', 'ma-pill-pending'], 'Confirmed' => ['Approved', 'ma-pill-approved'], 'Completed' => ['Completed', 'ma-pill-completed']][$row['Status']] ?? [$row['Status'], 'ma-pill-completed'];
+};
+$tabUrl = static function (string $tab) use ($search, $dateFilter): string {
+    return '?' . http_build_query(array_filter(['tab' => $tab, 'q' => $search, 'date' => $dateFilter], 'strlen'));
+};
+
 $pageTitle = 'Appointments — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>
 
-<main class="portal-shell"><div class="container">
+<main class="portal-shell"><div class="container sa-page">
+  <section class="sa-hero">
+    <span class="an-eyebrow">Front desk</span>
+    <h1>Appointments</h1>
+    <p>Review requests, manage today's schedule, and confirm finished visits.</p>
+    <form method="get" class="sa-filters">
+      <input type="hidden" name="tab" value="<?= htmlspecialchars($activeTab) ?>">
+      <label class="sa-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="search" name="q" value="<?= htmlspecialchars($search) ?>" placeholder="Search patient name" aria-label="Search patient name">
+      </label>
+      <input type="date" name="date" value="<?= htmlspecialchars($dateFilter) ?>" aria-label="Filter by date" onchange="this.form.submit()">
+      <button type="submit" class="btn sa-filter-btn">Search</button>
+      <?php if ($search !== '' || $dateFilter !== ''): ?><a href="?tab=<?= htmlspecialchars($activeTab) ?>" class="sa-clear">Clear</a><?php endif; ?>
+    </form>
+  </section>
+
   <?php if ($flash): ?><p class="form-message success" role="status"><?= htmlspecialchars($flash) ?></p><?php endif; ?>
   <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
 
-  <section class="admin-section admin-overview-grid">
-    <div class="overview-card">
-      <div class="portal-heading"><div><span class="section-kicker">Requests</span><h2>Appointment Requests <span class="status-badge" style="vertical-align:middle;"><?= count($requests) ?></span></h2></div></div>
-      <?php if ($requests): ?>
-        <div class="compact-list">
-          <?php foreach ($requests as $request): ?>
-            <article style="align-items:flex-start;flex-direction:column;gap:12px;">
-              <div style="display:flex;justify-content:space-between;width:100%;flex-wrap:wrap;gap:10px;">
-                <div>
-                  <strong><?= htmlspecialchars($request['FirstName'] . ' ' . $request['LastName']) ?></strong>
-                  <span style="display:block;color:var(--slate-500);font-size:13px;"><?= htmlspecialchars(date('M j, Y', strtotime($request['AppointmentDate']))) ?> at <?= htmlspecialchars(date('g:i A', strtotime($request['AppointmentTime']))) ?><?= $request['Concern'] ? ' — ' . htmlspecialchars($request['Concern']) : '' ?></span>
-                </div>
-                <button type="button" class="btn btn-ghost btn-sm view-concern-btn" data-target="patient-<?= (int) $request['AppointmentID'] ?>">View Patient Details</button>
-              </div>
+  <nav class="sa-tabs" aria-label="Appointment lists">
+    <?php foreach ($tabs as $key => $label): ?>
+      <a href="<?= htmlspecialchars($tabUrl($key)) ?>" class="sa-tab<?= $activeTab === $key ? ' is-active' : '' ?>"<?= $activeTab === $key ? ' aria-current="page"' : '' ?>>
+        <?= $key === 'today' && $dateFilter && $dateFilter !== $today ? htmlspecialchars(date('M j', strtotime($dateFilter))) : $label ?>
+        <?php if ($key !== 'all'): ?><span class="sa-count<?= $key === 'confirm' && $tabCounts[$key] ? ' is-amber' : '' ?>"><?= $tabCounts[$key] ?></span><?php endif; ?>
+      </a>
+    <?php endforeach; ?>
+  </nav>
 
-              <div id="patient-<?= (int) $request['AppointmentID'] ?>" class="dev-note" style="display:none;width:100%;">
-                <strong>Email:</strong> <?= htmlspecialchars($request['Email']) ?><br>
-                <strong>Contact:</strong> <?= htmlspecialchars($request['ContactNumber'] ?: 'Not provided') ?><br>
-                <strong>Patient since:</strong> <?= htmlspecialchars(date('M j, Y', strtotime($request['PatientSince']))) ?><br>
-                <strong>Visits at this clinic:</strong> <?= (int) $request['VisitCount'] ?>
-              </div>
-
-              <form method="post" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;width:100%;">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
-                <input type="hidden" name="appointment_id" value="<?= (int) $request['AppointmentID'] ?>">
-                <select name="physician_id" style="flex:1;min-width:180px;">
-                  <option value="">— No preference / not yet assigned —</option>
-                  <?php foreach ($physicians as $physician): ?>
-                    <option value="<?= (int) $physician['UserID'] ?>" <?= (int) $request['PhysicianID'] === (int) $physician['UserID'] ? 'selected' : '' ?>>Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></option>
-                  <?php endforeach; ?>
-                </select>
-                <button type="submit" name="form_type" value="accept_request" class="btn btn-primary btn-sm">Accept Request</button>
-                <button type="submit" name="form_type" value="reject_request" class="btn btn-outline btn-sm" onclick="return confirm('Reject this appointment request?');">Reject Request</button>
-              </form>
-
-              <button type="button" class="btn btn-ghost btn-sm view-concern-btn" data-target="reschedule-<?= (int) $request['AppointmentID'] ?>" style="padding-left:0;">Reschedule Appointment</button>
-              <form method="post" id="reschedule-<?= (int) $request['AppointmentID'] ?>" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;width:100%;">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
-                <input type="hidden" name="appointment_id" value="<?= (int) $request['AppointmentID'] ?>">
-                <input type="hidden" name="form_type" value="reschedule_request">
-                <input type="date" name="appointment_date" min="<?= date('Y-m-d') ?>" value="<?= htmlspecialchars($request['AppointmentDate']) ?>" required>
-                <input type="time" name="appointment_time" value="<?= htmlspecialchars($request['AppointmentTime']) ?>" required>
-                <button type="submit" class="btn btn-outline btn-sm">Save new schedule</button>
-              </form>
-            </article>
-          <?php endforeach; ?>
-        </div>
-      <?php else: ?>
-        <p class="admin-empty">No pending requests. New appointment requests for your clinic will appear here.</p>
-      <?php endif; ?>
-    </div>
-
-    <div class="overview-card">
-      <div class="portal-heading"><div><span class="section-kicker">Approvals</span><h2>Consultation Approvals <span class="status-badge" style="vertical-align:middle;"><?= count($pendingConfirmations) ?></span></h2></div></div>
-      <?php if ($pendingConfirmations): ?>
-        <div class="compact-list">
-          <?php foreach ($pendingConfirmations as $item): ?>
-            <article>
+  <?php if ($activeTab === 'requests'): ?>
+    <?php if ($requests): ?>
+      <div class="sa-list">
+        <?php foreach ($requests as $req): ?>
+          <?php
+            $id = (int) $req['AppointmentID'];
+            $refund = $req['BookingFeePaid'] ? (float) $req['BaseConsultationFee'] : 0;
+            $weekday = (int) date('N', strtotime($req['AppointmentDate']));
+          ?>
+          <article class="sa-item" data-request data-weekday="<?= $weekday ?>" data-date-label="<?= htmlspecialchars(date('M j', strtotime($req['AppointmentDate']))) ?>" data-is-today="<?= $req['AppointmentDate'] === $today ? '1' : '0' ?>">
+            <div class="sa-head">
+              <span class="sa-avatar"><?= htmlspecialchars($initials($req)) ?></span>
               <div>
-                <strong><?= htmlspecialchars($item['FirstName'] . ' ' . $item['LastName']) ?></strong>
-                <span><?= $item['PhyFirstName'] ? 'Dr. ' . htmlspecialchars($item['PhyFirstName'] . ' ' . $item['PhyLastName']) : 'No physician' ?> &middot; <?= htmlspecialchars(date('M j, Y', strtotime($item['AppointmentDate']))) ?><?= $item['FinalizedAt'] ? ' — notes finalized ' . htmlspecialchars(date('M j, g:i A', strtotime($item['FinalizedAt']))) : '' ?></span>
+                <strong><?= htmlspecialchars($req['FirstName'] . ' ' . $req['LastName']) ?></strong>
+                <p><?= htmlspecialchars(date('M j, g:i A', strtotime($req['AppointmentDate'] . ' ' . $req['AppointmentTime']))) ?> · <?= htmlspecialchars($concernLabel($req['Concern'])) ?> · requested <?= htmlspecialchars($timeAgo((int) $req['MinutesAgo'])) ?></p>
               </div>
-              <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="confirm_complete"><input type="hidden" name="appointment_id" value="<?= (int) $item['AppointmentID'] ?>"><button class="btn btn-primary btn-sm">Confirm Complete</button></form>
-            </article>
-          <?php endforeach; ?>
-        </div>
-      <?php else: ?>
-        <p class="admin-empty">Nothing awaiting confirmation. Once a physician finalizes a visit's notes, it will appear here.</p>
-      <?php endif; ?>
-    </div>
-  </section>
+            </div>
+
+            <form method="post" class="sa-approve-form">
+              <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+              <input type="hidden" name="appointment_id" value="<?= $id ?>">
+              <select name="physician_id" class="sa-physician" aria-label="Assign physician">
+                <option value="">Choose a physician…</option>
+                <?php foreach ($physicians as $physician): ?>
+                  <option value="<?= (int) $physician['UserID'] ?>" <?= (int) $req['PhysicianID'] === (int) $physician['UserID'] ? 'selected' : '' ?>>Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></option>
+                <?php endforeach; ?>
+              </select>
+              <div class="sa-actions">
+                <button type="button" class="btn btn-outline btn-sm" data-open-decline>Decline</button>
+                <button type="submit" name="form_type" value="accept_request" class="btn btn-outline btn-sm sa-approve">Approve</button>
+                <button type="button" class="sa-link" data-toggle="details-<?= $id ?>">Details</button>
+                <button type="button" class="sa-link" data-toggle="resched-<?= $id ?>">Reschedule</button>
+              </div>
+              <p class="sa-warning" hidden></p>
+            </form>
+
+            <div class="sa-details" id="details-<?= $id ?>" hidden>
+              <span><b>Email</b> <?= htmlspecialchars($req['Email']) ?></span>
+              <span><b>Contact</b> <?= htmlspecialchars($req['ContactNumber'] ?: 'Not provided') ?></span>
+              <span><b>Visits here</b> <?= (int) $req['VisitCount'] ?></span>
+            </div>
+
+            <form method="post" class="sa-resched" id="resched-<?= $id ?>" hidden>
+              <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+              <input type="hidden" name="form_type" value="reschedule_request">
+              <input type="hidden" name="appointment_id" value="<?= $id ?>">
+              <input type="date" name="appointment_date" min="<?= htmlspecialchars($today) ?>" value="<?= htmlspecialchars($req['AppointmentDate']) ?>" required>
+              <input type="time" name="appointment_time" value="<?= htmlspecialchars($req['AppointmentTime']) ?>" required>
+              <button type="submit" class="btn btn-outline btn-sm">Save new schedule</button>
+            </form>
+
+            <form method="post" class="sa-decline" hidden>
+              <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+              <input type="hidden" name="form_type" value="reject_request">
+              <input type="hidden" name="appointment_id" value="<?= $id ?>">
+              <p class="sa-decline-label">Reason for declining <span>(sent to patient)</span></p>
+              <div class="sa-chips">
+                <?php foreach ($declineReasons as $reason): ?>
+                  <label class="sa-chip"><input type="radio" name="decline_reason" value="<?= htmlspecialchars($reason) ?>" required><span><?= htmlspecialchars($reason) ?></span></label>
+                <?php endforeach; ?>
+              </div>
+              <input type="text" name="decline_reason_other" class="sa-other" maxlength="200" placeholder="Tell the patient why" hidden>
+              <?php if ($refund > 0): ?>
+                <p class="sa-refund">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="14" rx="2"/><path d="M16 13h2M2 10h20"/></svg>
+                  ₱<?= number_format($refund) ?> will be refunded to the patient's wallet.
+                </p>
+              <?php endif; ?>
+              <div class="sa-actions">
+                <button type="button" class="btn btn-outline btn-sm" data-cancel-decline>Cancel</button>
+                <button type="submit" class="btn btn-sm sa-confirm-decline">Confirm decline</button>
+              </div>
+            </form>
+          </article>
+        <?php endforeach; ?>
+      </div>
+    <?php else: ?>
+      <div class="ma-empty"><h3>No requests waiting</h3><p><?= $search !== '' || $dateFilter !== '' ? 'No requests match your search.' : 'New appointment requests for your clinic will appear here.' ?></p></div>
+    <?php endif; ?>
+
+  <?php elseif ($activeTab === 'today'): ?>
+    <?php if ($todayList): ?>
+      <div class="sa-list">
+        <?php foreach ($todayList as $row): ?>
+          <?php [$pillLabel, $pillClass] = $statusPill($row); ?>
+          <article class="sa-item sa-row">
+            <span class="sa-time"><?= htmlspecialchars(date('g:i A', strtotime($row['AppointmentTime']))) ?></span>
+            <div class="sa-row-main">
+              <strong><?= htmlspecialchars($row['FirstName'] . ' ' . $row['LastName']) ?></strong>
+              <p><?= htmlspecialchars($concernLabel($row['Concern'])) ?> · <?= $row['PhyLastName'] ? 'Dr. ' . htmlspecialchars($row['PhyLastName']) : 'No physician' ?><?= $row['BookingFeePaid'] ? '' : ' · walk-in' ?><?= $row['QueueNumber'] ? ' · queue #' . (int) $row['QueueNumber'] . ' (' . htmlspecialchars(str_replace('_', ' ', $row['QueueStatus'])) . ')' : '' ?></p>
+            </div>
+            <span class="ma-pill <?= $pillClass ?>"><?= $pillLabel ?></span>
+          </article>
+        <?php endforeach; ?>
+      </div>
+    <?php else: ?>
+      <div class="ma-empty"><h3>Nothing scheduled</h3><p>No approved appointments on <?= htmlspecialchars(date('M j, Y', strtotime($dateFilter ?: ($today ?? 'now')))) ?>.</p></div>
+    <?php endif; ?>
+
+  <?php elseif ($activeTab === 'confirm'): ?>
+    <?php if ($pendingConfirmations): ?>
+      <div class="sa-list">
+        <?php foreach ($pendingConfirmations as $item): ?>
+          <article class="sa-item sa-row">
+            <span class="sa-avatar"><?= htmlspecialchars($initials($item)) ?></span>
+            <div class="sa-row-main">
+              <strong><?= htmlspecialchars($item['FirstName'] . ' ' . $item['LastName']) ?></strong>
+              <p><?= $item['PhyLastName'] ? 'Dr. ' . htmlspecialchars($item['PhyLastName']) : 'No physician' ?> · <?= htmlspecialchars(date('M j, Y', strtotime($item['AppointmentDate']))) ?><?= $item['FinalizedAt'] ? ' · notes finalized ' . htmlspecialchars(date('M j, g:i A', strtotime($item['FinalizedAt']))) : '' ?></p>
+            </div>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="confirm_complete"><input type="hidden" name="appointment_id" value="<?= (int) $item['AppointmentID'] ?>"><button class="btn btn-primary btn-sm">Confirm complete</button></form>
+          </article>
+        <?php endforeach; ?>
+      </div>
+    <?php else: ?>
+      <div class="ma-empty"><h3>Nothing to confirm</h3><p>Once a physician finalizes a visit's notes, it will appear here for you to confirm.</p></div>
+    <?php endif; ?>
+
+  <?php else: ?>
+    <?php if ($allList): ?>
+      <div class="sa-list">
+        <?php foreach ($allList as $row): ?>
+          <?php [$pillLabel, $pillClass] = $statusPill($row); $ts = strtotime($row['AppointmentDate']); ?>
+          <article class="sa-item sa-row">
+            <div class="ma-date"><span><?= strtoupper(date('M', $ts)) ?></span><strong><?= date('j', $ts) ?></strong></div>
+            <div class="sa-row-main">
+              <strong><?= htmlspecialchars($row['FirstName'] . ' ' . $row['LastName']) ?></strong>
+              <p><?= htmlspecialchars(date('g:i A', strtotime($row['AppointmentTime']))) ?> · <?= htmlspecialchars($concernLabel($row['Concern'])) ?> · <?= $row['PhyLastName'] ? 'Dr. ' . htmlspecialchars($row['PhyLastName']) : 'No physician' ?><?= $row['DeclineReason'] ? ' · ' . htmlspecialchars($row['DeclineReason']) : '' ?></p>
+            </div>
+            <span class="ma-pill <?= $pillClass ?>"><?= $pillLabel ?></span>
+          </article>
+        <?php endforeach; ?>
+      </div>
+    <?php else: ?>
+      <div class="ma-empty"><h3>No appointments found</h3><p>Try a different name or date.</p></div>
+    <?php endif; ?>
+  <?php endif; ?>
 </div></main>
 
 <script>
-(function () {
-  document.querySelectorAll('.view-concern-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var panel = document.getElementById(btn.getAttribute('data-target'));
-      if (!panel) return;
-      var showing = panel.style.display !== 'none';
-      panel.style.display = showing ? 'none' : (panel.tagName === 'FORM' ? 'flex' : 'block');
+document.addEventListener('DOMContentLoaded', function () {
+  // Physician schedules: { id: { name, status, days: [ISO weekdays] } }.
+  var schedules = <?= json_encode($physicianSchedule, JSON_HEX_TAG | JSON_HEX_AMP) ?>;
+
+  document.querySelectorAll('[data-request]').forEach(function (item) {
+    var select = item.querySelector('.sa-physician');
+    var warning = item.querySelector('.sa-warning');
+    var approveForm = item.querySelector('.sa-approve-form');
+    var declineForm = item.querySelector('.sa-decline');
+    var otherInput = declineForm.querySelector('.sa-other');
+
+    // Warn when the chosen physician doesn't work that weekday (per their
+    // weekly schedule) or, for today's requests, is marked unavailable.
+    function checkPhysician() {
+      var info = schedules[select.value];
+      var message = '';
+      if (info) {
+        var weekday = parseInt(item.getAttribute('data-weekday'), 10);
+        if (info.days.length && info.days.indexOf(weekday) === -1) {
+          message = info.name + ' is unavailable on ' + item.getAttribute('data-date-label') + '. Assign another physician or decline.';
+        } else if (item.getAttribute('data-is-today') === '1' && info.status !== 'Available') {
+          message = info.name + ' is marked "' + info.status + '" today. Assign another physician or decline.';
+        }
+      }
+      warning.hidden = !message;
+      warning.textContent = message ? '⚠ ' + message : '';
+    }
+    select.addEventListener('change', checkPhysician);
+    checkPhysician();
+
+    item.querySelector('[data-open-decline]').addEventListener('click', function () {
+      approveForm.hidden = true;
+      declineForm.hidden = false;
+      item.classList.add('is-declining');
+    });
+    item.querySelector('[data-cancel-decline]').addEventListener('click', function () {
+      declineForm.hidden = true;
+      approveForm.hidden = false;
+      item.classList.remove('is-declining');
+    });
+    declineForm.querySelectorAll('input[name="decline_reason"]').forEach(function (radio) {
+      radio.addEventListener('change', function () {
+        var isOther = radio.value === 'Other' && radio.checked;
+        otherInput.hidden = !isOther;
+        otherInput.required = isOther;
+        if (isOther) otherInput.focus();
+      });
+    });
+
+    item.querySelectorAll('[data-toggle]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var panel = document.getElementById(btn.getAttribute('data-toggle'));
+        if (panel) panel.hidden = !panel.hidden;
+      });
     });
   });
-})();
+});
 </script>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>

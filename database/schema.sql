@@ -392,3 +392,44 @@ VALUES
 
 ALTER TABLE MedicalRecords
     ADD COLUMN IF NOT EXISTS Category VARCHAR(30) NOT NULL DEFAULT 'Other' AFTER Title;
+
+-- Announcements: optional source clinic (NULL = HealthQueue platform-wide),
+-- a category for the patient-side tag, and an optional date the announcement
+-- affects (patients booked at that clinic on that date see it pinned).
+ALTER TABLE Announcements
+    ADD COLUMN IF NOT EXISTS ClinicID    INT         NULL AFTER PostedByUserID,
+    ADD COLUMN IF NOT EXISTS Category    VARCHAR(30) NOT NULL DEFAULT 'General' AFTER Title, -- General, Closure, Schedule change, Event, Health advisory
+    ADD COLUMN IF NOT EXISTS AffectsDate DATE        NULL AFTER Audience;
+ALTER TABLE Announcements
+    ADD CONSTRAINT fk_announcements_clinic FOREIGN KEY IF NOT EXISTS (ClinicID) REFERENCES Clinic (ClinicID);
+
+-- When the patient last opened Announcements (drives the "New" dots/count).
+ALTER TABLE Users
+    ADD COLUMN IF NOT EXISTS AnnouncementsSeenAt DATETIME NULL;
+
+-- Announcements a patient has deleted from their own view. Announcements are
+-- shared, so "delete" only hides it for that user.
+CREATE TABLE IF NOT EXISTS AnnouncementDismissals (
+    UserID         INT NOT NULL,
+    AnnouncementID INT NOT NULL,
+    DismissedAt    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (UserID, AnnouncementID),
+    CONSTRAINT fk_ann_dismiss_user FOREIGN KEY (UserID) REFERENCES Users (UserID),
+    CONSTRAINT fk_ann_dismiss_announcement FOREIGN KEY (AnnouncementID) REFERENCES Announcements (AnnouncementID) ON DELETE CASCADE
+);
+
+-- Reason the clinic gave when declining a request (shown to the patient).
+-- Separate from CancellationReason, which is the patient's own reason.
+ALTER TABLE Appointments
+    ADD COLUMN IF NOT EXISTS DeclineReason VARCHAR(255) NULL AFTER CancellationReason;
+
+-- Queue ordering + priority. Position lets front-desk staff reorder the
+-- waiting line (NULL = natural order, QueueNumber * 10); Priority tags
+-- walk-ins such as seniors/PWD/pregnant who are placed ahead of the line.
+ALTER TABLE Queue
+    ADD COLUMN IF NOT EXISTS Position INT         NULL AFTER QueueNumber,
+    ADD COLUMN IF NOT EXISTS Priority VARCHAR(20) NULL AFTER Position;
+
+-- Optional photo attached to an announcement (file in assets/uploads/announcements).
+ALTER TABLE Announcements
+    ADD COLUMN IF NOT EXISTS PhotoPath VARCHAR(255) NULL AFTER Message;

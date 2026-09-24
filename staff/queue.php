@@ -7,12 +7,48 @@ require_once __DIR__ . '/../includes/notifications.php';
 define('HQ_BASE_URL', '..');
 requireRole(['Staff']);
 
+// Waiting longer than this is highlighted.
+const LONG_WAIT_MINUTES = 30;
+const PRIORITY_OPTIONS = ['Senior', 'PWD', 'Pregnant'];
+// The waiting line is ordered by COALESCE(Position, QueueNumber * 10).
+const QUEUE_ORDER_SQL = 'COALESCE(q.Position, q.QueueNumber * 10), q.QueueNumber';
+
 $user = currentUser();
 $pdo = getDbConnection();
 $errors = [];
 $flash = '';
 $clinicId = (int) $user['ClinicID'];
-$walkInValues = ['first_name' => '', 'last_name' => '', 'contact_number' => '', 'email' => '', 'physician_id' => '', 'concern' => ''];
+$physicianFilter = filter_var($_GET['physician'] ?? null, FILTER_VALIDATE_INT) ?: null;
+$walkInValues = ['first_name' => '', 'last_name' => '', 'contact_number' => '', 'email' => '', 'physician_id' => '', 'concern' => '', 'priority' => ''];
+
+/** Today's waiting entries for the clinic (optionally one physician), in line order. */
+function waitingLine(PDO $pdo, int $clinicId, ?int $physicianId): array
+{
+    $sql = "SELECT q.QueueID, COALESCE(q.Position, q.QueueNumber * 10) AS Pos FROM Queue q
+            WHERE q.ClinicID = ? AND DATE(q.CreatedAt) = CURDATE() AND q.Status = 'Waiting'";
+    $params = [$clinicId];
+    if ($physicianId) {
+        $sql .= ' AND q.PhysicianID = ?';
+        $params[] = $physicianId;
+    }
+    $stmt = $pdo->prepare($sql . ' ORDER BY ' . QUEUE_ORDER_SQL);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+}
+
+/** Marks a waiting entry as Calling and notifies the patient. */
+function callQueueEntry(PDO $pdo, int $queueId, int $clinicId, int $staffId): ?int
+{
+    $stmt = $pdo->prepare("UPDATE Queue SET Status = 'Calling', CalledAt = NOW() WHERE QueueID = ? AND ClinicID = ? AND Status = 'Waiting'");
+    $stmt->execute([$queueId, $clinicId]);
+    if (!$stmt->rowCount()) return null;
+    $row = $pdo->prepare('SELECT q.QueueNumber, a.PatientID, a.AppointmentID FROM Queue q JOIN Appointments a ON a.AppointmentID = q.AppointmentID WHERE q.QueueID = ?');
+    $row->execute([$queueId]);
+    $entry = $row->fetch();
+    notifyPatient($pdo, (int) $entry['PatientID'], "You're being called now — please proceed to the counter.", (int) $entry['AppointmentID']);
+    logActivity($pdo, $staffId, $clinicId, 'Updated queue status', "Queue #{$entry['QueueNumber']} set to Calling");
+    return (int) $entry['QueueNumber'];
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
@@ -21,6 +57,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'The database is temporarily unavailable.';
     } else {
         $formType = $_POST['form_type'] ?? '';
+        $queueId = filter_input(INPUT_POST, 'queue_id', FILTER_VALIDATE_INT);
 
         if ($formType === 'register_walkin') {
             foreach ($walkInValues as $field => $value) $walkInValues[$field] = trim((string) ($_POST[$field] ?? ''));
@@ -28,6 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($walkInValues['first_name'] === '' || $walkInValues['last_name'] === '') $errors[] = 'First and last name are required.';
             if ($walkInValues['contact_number'] === '') $errors[] = 'Contact number is required.';
             if ($walkInValues['email'] !== '' && !filter_var($walkInValues['email'], FILTER_VALIDATE_EMAIL)) $errors[] = 'Please enter a valid email address, or leave it blank.';
+            if ($walkInValues['priority'] !== '' && !in_array($walkInValues['priority'], PRIORITY_OPTIONS, true)) $errors[] = 'Please choose a valid priority.';
 
             if (!$errors) {
                 try {
@@ -76,15 +114,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $queueNumStmt->execute([$clinicId]);
                         $queueNumber = (int) $queueNumStmt->fetchColumn();
 
+                        // Priority walk-ins go just ahead of the first non-priority patient still waiting.
+                        $position = $queueNumber * 10;
+                        if ($walkInValues['priority'] !== '') {
+                            $firstRegular = $pdo->prepare(
+                                "SELECT MIN(COALESCE(q.Position, q.QueueNumber * 10)) FROM Queue q
+                                 WHERE q.ClinicID = ? AND DATE(q.CreatedAt) = CURDATE() AND q.Status = 'Waiting' AND q.Priority IS NULL"
+                            );
+                            $firstRegular->execute([$clinicId]);
+                            $firstPos = $firstRegular->fetchColumn();
+                            if ($firstPos !== null) $position = (int) $firstPos - 1;
+                        }
+
                         $insertQueue = $pdo->prepare(
-                            "INSERT INTO Queue (ClinicID, AppointmentID, PhysicianID, QueueNumber, Status, CreatedByStaffID) VALUES (?, ?, ?, ?, 'Waiting', ?)"
+                            "INSERT INTO Queue (ClinicID, AppointmentID, PhysicianID, QueueNumber, Position, Priority, Status, CreatedByStaffID) VALUES (?, ?, ?, ?, ?, ?, 'Waiting', ?)"
                         );
-                        $insertQueue->execute([$clinicId, $appointmentId, $physicianId, $queueNumber, $user['UserID']]);
+                        $insertQueue->execute([$clinicId, $appointmentId, $physicianId, $queueNumber, $position, $walkInValues['priority'] ?: null, $user['UserID']]);
 
                         $pdo->commit();
                         logActivity($pdo, $user['UserID'], $clinicId, 'Registered walk-in patient', "{$walkInValues['first_name']} {$walkInValues['last_name']}, queue #{$queueNumber}");
-                        $flash = "Walk-in registered as queue #{$queueNumber}.";
-                        $walkInValues = ['first_name' => '', 'last_name' => '', 'contact_number' => '', 'email' => '', 'physician_id' => '', 'concern' => ''];
+                        $flash = "Walk-in registered as queue #{$queueNumber}" . ($walkInValues['priority'] ? " (priority: {$walkInValues['priority']})." : '.');
+                        $walkInValues = array_map(static fn() => '', $walkInValues);
                     }
 
                     if ($errors && $pdo->inTransaction()) $pdo->rollBack();
@@ -94,12 +144,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $errors[] = 'We could not register this walk-in. Please try again.';
                 }
             }
+        } elseif ($formType === 'call_next') {
+            try {
+                $filterPhysician = filter_input(INPUT_POST, 'physician_filter', FILTER_VALIDATE_INT) ?: null;
+                $line = waitingLine($pdo, $clinicId, $filterPhysician);
+                $called = $line ? callQueueEntry($pdo, (int) $line[0]['QueueID'], $clinicId, (int) $user['UserID']) : null;
+                if ($called) {
+                    $flash = "Calling queue #{$called}.";
+                } else {
+                    $errors[] = 'No one is waiting in this line.';
+                }
+            } catch (PDOException $e) {
+                error_log('Call next failed: ' . $e->getMessage());
+                $errors[] = 'We could not call the next patient.';
+            }
+        } elseif ($formType === 'recall' && $queueId) {
+            try {
+                $row = $pdo->prepare(
+                    "SELECT q.QueueNumber, a.PatientID, a.AppointmentID FROM Queue q JOIN Appointments a ON a.AppointmentID = q.AppointmentID
+                     WHERE q.QueueID = ? AND q.ClinicID = ? AND q.Status = 'Calling'"
+                );
+                $row->execute([$queueId, $clinicId]);
+                if ($entry = $row->fetch()) {
+                    notifyPatient($pdo, (int) $entry['PatientID'], "Reminder: it's your turn (queue #{$entry['QueueNumber']}) — please proceed to the counter.", (int) $entry['AppointmentID']);
+                    logActivity($pdo, $user['UserID'], $clinicId, 'Recalled patient', "Queue #{$entry['QueueNumber']}");
+                    $flash = "Recalled queue #{$entry['QueueNumber']}.";
+                } else {
+                    $errors[] = 'That patient is no longer being called.';
+                }
+            } catch (PDOException $e) {
+                error_log('Recall failed: ' . $e->getMessage());
+                $errors[] = 'We could not recall this patient.';
+            }
+        } elseif (in_array($formType, ['move_up', 'move_down', 'move_last'], true) && $queueId) {
+            try {
+                // Reorder within the line currently shown (all, or one physician's).
+                $filterPhysician = filter_input(INPUT_POST, 'physician_filter', FILTER_VALIDATE_INT) ?: null;
+                $line = waitingLine($pdo, $clinicId, $filterPhysician);
+                $ids = array_map(static fn($r) => (int) $r['QueueID'], $line);
+                $index = array_search($queueId, $ids, true);
+                $setPos = $pdo->prepare('UPDATE Queue SET Position = ? WHERE QueueID = ? AND ClinicID = ?');
+
+                if ($index === false) {
+                    $errors[] = 'That patient is no longer waiting.';
+                } elseif ($formType === 'move_last') {
+                    $allLine = waitingLine($pdo, $clinicId, null);
+                    $setPos->execute([(int) end($allLine)['Pos'] + 10, $queueId, $clinicId]);
+                    $flash = 'Moved to the end of the line.';
+                } else {
+                    $swapWith = $formType === 'move_up' ? $index - 1 : $index + 1;
+                    if (isset($line[$swapWith])) {
+                        $a = $line[$index];
+                        $b = $line[$swapWith];
+                        // Equal positions can't be swapped meaningfully, so nudge.
+                        $posA = (int) $b['Pos'];
+                        $posB = (int) $a['Pos'] === (int) $b['Pos'] ? (int) $a['Pos'] + ($formType === 'move_up' ? 1 : -1) : (int) $a['Pos'];
+                        $setPos->execute([$posA, $a['QueueID'], $clinicId]);
+                        $setPos->execute([$posB, $b['QueueID'], $clinicId]);
+                    }
+                }
+            } catch (PDOException $e) {
+                error_log('Queue reorder failed: ' . $e->getMessage());
+                $errors[] = 'We could not reorder the queue.';
+            }
         } elseif (in_array($formType, ['call_patient', 'mark_serving', 'skip_forfeit', 'remove_from_queue'], true)) {
-            $queueId = filter_input(INPUT_POST, 'queue_id', FILTER_VALIDATE_INT);
             $transitions = [
-                'call_patient'      => ['from' => 'Waiting', 'to' => 'Calling', 'stamp' => 'CalledAt'],
-                'mark_serving'      => ['from' => 'Calling', 'to' => 'Serving', 'stamp' => 'ServedAt'],
-                'skip_forfeit'      => ['from' => 'Calling', 'to' => 'Forfeited_Late', 'stamp' => null],
+                'call_patient'      => ['from' => ['Waiting'], 'to' => 'Calling', 'stamp' => 'CalledAt'],
+                'mark_serving'      => ['from' => ['Calling'], 'to' => 'Serving', 'stamp' => 'ServedAt'],
+                'skip_forfeit'      => ['from' => ['Calling', 'Serving'], 'to' => 'Forfeited_Late', 'stamp' => null],
                 'remove_from_queue' => ['from' => null, 'to' => 'Removed', 'stamp' => null],
             ];
             $t = $transitions[$formType];
@@ -108,28 +220,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'Invalid queue entry.';
             } else {
                 try {
-                    $sql = 'UPDATE Queue SET Status = ?' . ($t['stamp'] ? ", {$t['stamp']} = NOW()" : '') . ' WHERE QueueID = ? AND ClinicID = ?';
-                    $params = [$t['to'], $queueId, $clinicId];
-                    if ($t['from']) {
-                        $sql .= ' AND Status = ?';
-                        $params[] = $t['from'];
-                    }
-                    $stmt = $pdo->prepare($sql);
-                    $stmt->execute($params);
-                    if ($stmt->rowCount()) {
-                        logActivity($pdo, $user['UserID'], $clinicId, 'Updated queue status', "Queue #{$queueId} set to {$t['to']}");
-                        if ($formType === 'call_patient') {
-                            $patientStmt = $pdo->prepare(
-                                'SELECT a.PatientID, a.AppointmentID FROM Queue q JOIN Appointments a ON a.AppointmentID = q.AppointmentID WHERE q.QueueID = ?'
-                            );
-                            $patientStmt->execute([$queueId]);
-                            if ($row = $patientStmt->fetch()) {
-                                notifyPatient($pdo, (int) $row['PatientID'], "You're being called now — please proceed to the counter.", (int) $row['AppointmentID']);
-                            }
+                    if ($formType === 'call_patient') {
+                        $called = callQueueEntry($pdo, $queueId, $clinicId, (int) $user['UserID']);
+                        if ($called) {
+                            $flash = "Calling queue #{$called}.";
+                        } else {
+                            $errors[] = 'That queue entry could not be updated (it may have already changed).';
                         }
-                        $flash = 'Queue updated.';
                     } else {
-                        $errors[] = 'That queue entry could not be updated (it may have already changed).';
+                        $sql = 'UPDATE Queue SET Status = ?' . ($t['stamp'] ? ", {$t['stamp']} = NOW()" : '') . ' WHERE QueueID = ? AND ClinicID = ?';
+                        $params = [$t['to'], $queueId, $clinicId];
+                        if ($t['from']) {
+                            $sql .= ' AND Status IN (' . implode(',', array_fill(0, count($t['from']), '?')) . ')';
+                            array_push($params, ...$t['from']);
+                        }
+                        $stmt = $pdo->prepare($sql);
+                        $stmt->execute($params);
+                        if ($stmt->rowCount()) {
+                            logActivity($pdo, $user['UserID'], $clinicId, 'Updated queue status', "Queue entry {$queueId} set to {$t['to']}");
+                            $flash = ['mark_serving' => 'Marked as serving.', 'skip_forfeit' => 'Marked as a no-show.', 'remove_from_queue' => 'Removed from the queue.'][$formType];
+                        } else {
+                            $errors[] = 'That queue entry could not be updated (it may have already changed).';
+                        }
                     }
                 } catch (PDOException $e) {
                     error_log('Queue transition failed: ' . $e->getMessage());
@@ -167,7 +279,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ->execute([$appointmentId]);
                         logActivity($pdo, $user['UserID'], $clinicId, 'Confirmed consultation complete', "Appointment #{$appointmentId}");
                         notifyPatient($pdo, (int) $target['PatientID'], 'Your consultation record is ready to view.', $appointmentId);
-                        $flash = 'Consultation confirmed as complete.';
+                        $flash = 'Visit marked as done.';
                     }
                 } catch (PDOException $e) {
                     error_log('Confirm consultation complete failed: ' . $e->getMessage());
@@ -175,7 +287,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } elseif ($formType === 'reschedule_from_queue') {
-            $queueId = filter_input(INPUT_POST, 'queue_id', FILTER_VALIDATE_INT);
             $appointmentId = filter_input(INPUT_POST, 'appointment_id', FILTER_VALIDATE_INT);
             $newDate = trim((string) ($_POST['appointment_date'] ?? ''));
             $newTime = trim((string) ($_POST['appointment_time'] ?? ''));
@@ -201,17 +312,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$queueEntries = [];
+$entries = [];
 $physicians = [];
+$tabCounts = ['all' => 0];
 $dataError = null;
 
 if ($pdo && $clinicId) {
     try {
         $stmt = $pdo->prepare(
-            "SELECT q.QueueID, q.QueueNumber, q.Status, q.AppointmentID, q.CalledAt, q.ServedAt,
-                    a.AppointmentDate, a.AppointmentTime, a.Concern,
+            "SELECT q.QueueID, q.QueueNumber, q.Status, q.Priority, q.PhysicianID, q.AppointmentID,
+                    TIMESTAMPDIFF(MINUTE, q.CreatedAt, NOW()) AS WaitingMinutes,
+                    TIMESTAMPDIFF(MINUTE, COALESCE(q.ServedAt, q.CalledAt), NOW()) AS ActiveMinutes,
+                    a.AppointmentDate, a.AppointmentTime, a.Concern, a.BookingFeePaid,
                     pat.FirstName, pat.LastName,
-                    phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName,
+                    phy.LastName AS PhyLastName,
                     (SELECT COUNT(*) FROM ConsultationVersions v
                      JOIN Consultations cons ON cons.ConsultationID = v.ConsultationID
                      WHERE cons.AppointmentID = a.AppointmentID AND v.Status = 'Finalized') AS FinalizedCount
@@ -220,89 +334,144 @@ if ($pdo && $clinicId) {
              JOIN Users pat ON pat.UserID = a.PatientID
              LEFT JOIN Users phy ON phy.UserID = q.PhysicianID
              WHERE q.ClinicID = ? AND DATE(q.CreatedAt) = CURDATE()
-             ORDER BY q.QueueNumber"
+             ORDER BY " . QUEUE_ORDER_SQL
         );
         $stmt->execute([$clinicId]);
-        $queueEntries = $stmt->fetchAll();
+        $entries = $stmt->fetchAll();
 
-        $physicians = $pdo->query(
+        $physStmt = $pdo->prepare(
             "SELECT UserID, FirstName, LastName FROM Users
-             WHERE ClinicID = {$clinicId} AND RoleID = (SELECT RoleID FROM Roles WHERE RoleName = 'Physician') AND Status = 'Active'
+             WHERE ClinicID = ? AND RoleID = (SELECT RoleID FROM Roles WHERE RoleName = 'Physician') AND Status = 'Active'
              ORDER BY LastName"
-        )->fetchAll();
+        );
+        $physStmt->execute([$clinicId]);
+        $physicians = $physStmt->fetchAll();
+
+        foreach ($entries as $entry) {
+            if (!in_array($entry['Status'], ['Waiting', 'Calling', 'Serving'], true)) continue;
+            $tabCounts['all']++;
+            if ($entry['PhysicianID']) $tabCounts[(int) $entry['PhysicianID']] = ($tabCounts[(int) $entry['PhysicianID']] ?? 0) + 1;
+        }
     } catch (PDOException $e) {
         error_log('Queue list load failed: ' . $e->getMessage());
         $dataError = 'The queue is temporarily unavailable.';
     }
 }
 
+// Split today's entries for the selected physician tab.
+$visible = array_filter($entries, static fn($e) => !$physicianFilter || (int) $e['PhysicianID'] === $physicianFilter);
+$active = array_values(array_filter($visible, static fn($e) => in_array($e['Status'], ['Calling', 'Serving'], true)));
+$waiting = array_values(array_filter($visible, static fn($e) => $e['Status'] === 'Waiting'));
+$finished = array_values(array_filter($visible, static fn($e) => in_array($e['Status'], ['Completed', 'Forfeited_Late', 'Removed'], true)));
+$finishedCounts = ['Completed' => 0, 'Forfeited_Late' => 0, 'Removed' => 0];
+foreach ($finished as $entry) $finishedCounts[$entry['Status']]++;
+
 $walkInHasData = (bool) array_filter($walkInValues);
+$csrf = htmlspecialchars(csrfToken());
+$filterInput = $physicianFilter ? '<input type="hidden" name="physician_filter" value="' . $physicianFilter . '">' : '';
+$sourceLabel = static fn(array $e): string => $e['BookingFeePaid'] ? 'Appointment ' . date('g:i A', strtotime($e['AppointmentTime'])) : 'Walk-in';
+$concern = static fn(array $e): string => mb_strimwidth(trim((string) $e['Concern']) ?: 'General', 0, 30, '…');
+$minutesLabel = static function (int $minutes): string {
+    return $minutes < 60 ? $minutes . ' min' : intdiv($minutes, 60) . ' h ' . ($minutes % 60) . ' min';
+};
 
-// Renders the "Today's line" queue list once, so both the full page and the
-// periodic AJAX auto-refresh (below) share exactly the same markup.
+// Rendered once so the full page and the periodic auto-refresh share markup.
 ob_start();
-if ($queueEntries):
 ?>
-      <div class="compact-list">
-        <?php foreach ($queueEntries as $entry): ?>
-          <article style="align-items:flex-start;flex-direction:column;gap:10px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;width:100%;flex-wrap:wrap;gap:10px;">
-              <div>
-                <strong>#<?= (int) $entry['QueueNumber'] ?> — <?= htmlspecialchars($entry['FirstName'] . ' ' . $entry['LastName']) ?></strong>
-                <span style="display:block;color:var(--slate-500);font-size:13px;">
-                  <?= $entry['PhyFirstName'] ? 'Dr. ' . htmlspecialchars($entry['PhyFirstName'] . ' ' . $entry['PhyLastName']) : '<span class="unassigned">Unassigned</span>' ?>
-                  <?= $entry['Concern'] ? ' — ' . htmlspecialchars($entry['Concern']) : '' ?>
-                </span>
-              </div>
-              <span class="status-badge status-<?= strtolower($entry['Status']) ?>"><?= htmlspecialchars(str_replace('_', ' ', $entry['Status'])) ?></span>
-            </div>
+  <h3 class="qm-section-title">Now serving</h3>
+  <?php if ($active): ?>
+    <?php foreach ($active as $entry): ?>
+      <?php $isServing = $entry['Status'] === 'Serving'; ?>
+      <section class="qm-serving">
+        <div class="qm-serving-top">
+          <div class="qm-serving-num"><span><?= $isServing ? 'Serving' : 'Calling' ?></span><strong>#<?= (int) $entry['QueueNumber'] ?></strong></div>
+          <div class="qm-serving-info">
+            <h2><?= htmlspecialchars($entry['FirstName'] . ' ' . $entry['LastName']) ?><?php if ($entry['Priority']): ?> <span class="qm-priority">Priority · <?= htmlspecialchars($entry['Priority']) ?></span><?php endif; ?></h2>
+            <p><?= htmlspecialchars($concern($entry)) ?> · <?= htmlspecialchars(lcfirst($sourceLabel($entry))) ?><?= $entry['PhyLastName'] ? ' · Dr. ' . htmlspecialchars($entry['PhyLastName']) : '' ?> · <?= $isServing ? 'in consultation ' : 'called ' ?><?= $minutesLabel((int) $entry['ActiveMinutes']) ?><?= $isServing ? '' : ' ago' ?></p>
+          </div>
+        </div>
+        <div class="qm-serving-actions">
+          <?php if (!$isServing): ?>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="recall"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>">
+              <button class="btn btn-outline btn-sm"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>Recall</button></form>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="mark_serving"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>">
+              <button class="btn btn-outline btn-sm">Patient arrived</button></form>
+          <?php endif; ?>
+          <form method="post" onsubmit="return confirm('Mark #<?= (int) $entry['QueueNumber'] ?> as a no-show?');"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="skip_forfeit"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>">
+            <button class="btn btn-outline btn-sm qm-danger">No-show</button></form>
+          <?php if ($isServing): ?>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="confirm_complete"><input type="hidden" name="appointment_id" value="<?= (int) $entry['AppointmentID'] ?>">
+              <button class="btn btn-outline btn-sm"<?= (int) $entry['FinalizedCount'] > 0 ? '' : ' disabled title="Waiting for the physician to finalize their notes"' ?>>Mark done</button></form>
+          <?php endif; ?>
+          <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="call_next"><?= $filterInput ?>
+            <button class="btn btn-outline btn-sm"<?= $waiting ? '' : ' disabled' ?>>Call next &rarr;</button></form>
+        </div>
+        <?php if ($isServing && (int) $entry['FinalizedCount'] === 0): ?><p class="qm-hint">"Mark done" unlocks once the physician finalizes their notes.</p><?php endif; ?>
+      </section>
+    <?php endforeach; ?>
+  <?php else: ?>
+    <section class="qm-serving qm-serving-empty">
+      <p>No one is being served right now.</p>
+      <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="call_next"><?= $filterInput ?>
+        <button class="btn btn-primary btn-sm"<?= $waiting ? '' : ' disabled' ?>>Call next &rarr;</button></form>
+    </section>
+  <?php endif; ?>
 
-            <?php if (in_array($entry['Status'], ['Waiting', 'Calling', 'Serving'], true)): ?>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                <?php if ((int) $entry['FinalizedCount'] > 0): ?>
-                  <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="confirm_complete"><input type="hidden" name="appointment_id" value="<?= (int) $entry['AppointmentID'] ?>"><button class="btn btn-primary btn-sm">End Consultation</button></form>
-                <?php elseif ($entry['Status'] === 'Waiting'): ?>
-                  <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="call_patient"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>"><button class="btn btn-primary btn-sm">Call Patient</button></form>
-                <?php elseif ($entry['Status'] === 'Calling'): ?>
-                  <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="mark_serving"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>"><button class="btn btn-primary btn-sm">Mark as Serving</button></form>
-                  <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="skip_forfeit"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>"><button class="btn btn-outline btn-sm" onclick="return confirm('Mark this patient as a late forfeit?');">Skip / Forfeit (Late)</button></form>
-                <?php elseif ($entry['Status'] === 'Serving'): ?>
-                  <span class="admin-empty" style="text-align:left;">Waiting on physician's finalized notes</span>
-                <?php endif; ?>
-                <?php if ($entry['Status'] !== 'Serving' && (int) $entry['FinalizedCount'] === 0): ?>
-                  <button type="button" class="btn btn-ghost btn-sm view-concern-btn" data-target="resched-<?= (int) $entry['QueueID'] ?>">Reschedule from Queue</button>
-                <?php endif; ?>
-                <form method="post"><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>"><input type="hidden" name="form_type" value="remove_from_queue"><input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>"><button class="btn btn-outline btn-sm" onclick="return confirm('Remove this patient from the queue?');">Remove from Queue</button></form>
-              </div>
+  <h3 class="qm-section-title">Waiting · <?= count($waiting) ?></h3>
+  <?php if ($waiting): ?>
+    <div class="qm-list">
+      <?php foreach ($waiting as $i => $entry): ?>
+        <?php $mins = (int) $entry['WaitingMinutes']; $qid = (int) $entry['QueueID']; ?>
+        <article class="qm-row">
+          <span class="qm-num">#<?= (int) $entry['QueueNumber'] ?></span>
+          <div class="qm-row-main">
+            <strong><?= htmlspecialchars($entry['FirstName'] . ' ' . $entry['LastName']) ?><?php if ($entry['Priority']): ?> <span class="qm-priority">Priority · <?= htmlspecialchars($entry['Priority']) ?></span><?php endif; ?></strong>
+            <p><?= htmlspecialchars($sourceLabel($entry)) ?> · <?= htmlspecialchars($concern($entry)) ?><?= !$physicianFilter && $entry['PhyLastName'] ? ' · Dr. ' . htmlspecialchars($entry['PhyLastName']) : '' ?></p>
+          </div>
+          <span class="qm-wait<?= $mins >= LONG_WAIT_MINUTES ? ' is-long' : '' ?>">waiting <?= $minutesLabel($mins) ?></span>
+          <div class="qm-icons">
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="move_up"><input type="hidden" name="queue_id" value="<?= $qid ?>"><?= $filterInput ?>
+              <button class="qm-icon" aria-label="Move up" title="Move up"<?= $i === 0 ? ' disabled' : '' ?>><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg></button></form>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="move_down"><input type="hidden" name="queue_id" value="<?= $qid ?>"><?= $filterInput ?>
+              <button class="qm-icon" aria-label="Move down" title="Move down"<?= $i === count($waiting) - 1 ? ' disabled' : '' ?>><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg></button></form>
+            <form method="post"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="move_last"><input type="hidden" name="queue_id" value="<?= $qid ?>"><?= $filterInput ?>
+              <button class="qm-icon" aria-label="Send to end of line" title="Send to end of line"<?= $i === count($waiting) - 1 ? ' disabled' : '' ?>><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 5 8 7-8 7V5zM18 5v14"/></svg></button></form>
+            <form method="post" onsubmit="return confirm('Remove #<?= (int) $entry['QueueNumber'] ?> from the queue?');"><input type="hidden" name="csrf_token" value="<?= $csrf ?>"><input type="hidden" name="form_type" value="remove_from_queue"><input type="hidden" name="queue_id" value="<?= $qid ?>">
+              <button class="qm-icon qm-icon-danger" aria-label="Remove from queue" title="Remove from queue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></form>
+          </div>
+        </article>
+      <?php endforeach; ?>
+    </div>
+  <?php else: ?>
+    <p class="qm-empty">No one is waiting. Register a walk-in or approve a request to add patients.</p>
+  <?php endif; ?>
 
-              <form method="post" id="resched-<?= (int) $entry['QueueID'] ?>" style="display:none;gap:8px;flex-wrap:wrap;align-items:center;">
-                <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
-                <input type="hidden" name="form_type" value="reschedule_from_queue">
-                <input type="hidden" name="queue_id" value="<?= (int) $entry['QueueID'] ?>">
-                <input type="hidden" name="appointment_id" value="<?= (int) $entry['AppointmentID'] ?>">
-                <input type="date" name="appointment_date" min="<?= date('Y-m-d') ?>" value="<?= htmlspecialchars($entry['AppointmentDate']) ?>" required>
-                <input type="time" name="appointment_time" value="<?= htmlspecialchars($entry['AppointmentTime']) ?>" required>
-                <button type="submit" class="btn btn-outline btn-sm">Save new schedule</button>
-              </form>
-            <?php endif; ?>
-          </article>
+  <details class="qm-finished">
+    <summary>
+      <span>Finished today</span>
+      <span class="qm-finished-pills">
+        <span class="ma-pill ma-pill-approved"><?= $finishedCounts['Completed'] ?> done</span>
+        <span class="ma-pill ma-pill-declined"><?= $finishedCounts['Forfeited_Late'] ?> no-show</span>
+        <span class="ma-pill ma-pill-completed"><?= $finishedCounts['Removed'] ?> removed</span>
+      </span>
+    </summary>
+    <?php if ($finished): ?>
+      <ul>
+        <?php foreach ($finished as $entry): ?>
+          <li><span class="qm-num">#<?= (int) $entry['QueueNumber'] ?></span><?= htmlspecialchars($entry['FirstName'] . ' ' . $entry['LastName']) ?><em><?= ['Completed' => 'Done', 'Forfeited_Late' => 'No-show', 'Removed' => 'Removed'][$entry['Status']] ?></em></li>
         <?php endforeach; ?>
-      </div>
+      </ul>
+    <?php else: ?>
+      <p class="qm-empty">Nothing finished yet today.</p>
+    <?php endif; ?>
+  </details>
 <?php
-else:
-?>
-      <div class="empty-state"><div class="empty-icon">+</div><h3>No one in the queue yet today</h3><p>Register a walk-in patient, or accept an appointment request to add someone to the line.</p></div>
-<?php
-endif;
-$queueListHtml = ob_get_clean();
+$queueHtml = ob_get_clean();
 
-// Periodic auto-refresh (see the inline script near the bottom of this page)
-// fetches this same URL with an AJAX header and expects just this fragment
-// back, so front-desk staff see new walk-ins / queue changes without having
-// to manually reload the page.
-$isAjax = $_SERVER['REQUEST_METHOD'] === 'GET' && ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch';
-if ($isAjax) {
-    echo $queueListHtml;
+// Periodic auto-refresh (bottom of page) fetches this URL with an AJAX
+// header and swaps in just this fragment.
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch') {
+    echo $queueHtml;
     exit;
 }
 
@@ -310,30 +479,47 @@ $pageTitle = 'Queue Management — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>
 
-<main class="portal-shell"><div class="container">
-  <section class="portal-hero"><div><span class="eyebrow">Front desk</span><h1>Queue Management</h1><p>Today's walk-in and confirmed patients, in line order.</p></div></section>
+<main class="portal-shell"><div class="container qm-page">
+  <section class="sd-hero qm-hero" id="walk-in">
+    <div>
+      <span class="an-eyebrow">Front desk</span>
+      <h1>Queue Management</h1>
+      <p>Today's walk-in and confirmed patients, in line order.</p>
+    </div>
+    <div class="sd-hero-actions">
+      <a href="<?= HQ_BASE_URL ?>/staff/display-board.php" class="btn sd-btn-ghost" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="m17 2-5 5-5-5"/></svg>
+        Display board
+      </a>
+      <button type="button" class="btn sd-btn-call" data-modal-open="registerWalkinModal">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+        Register walk-in
+      </button>
+    </div>
+  </section>
 
   <?php if ($flash): ?><p class="form-message success" role="status"><?= htmlspecialchars($flash) ?></p><?php endif; ?>
-  <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
+  <?php if ($errors && !$walkInHasData): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
 
-  <section class="portal-section" id="walk-in">
-    <div class="portal-heading"><div><span class="section-kicker">Front desk</span><h2>Register Walk-in Patient</h2></div></div>
-    <button type="button" class="btn btn-primary" data-modal-open="registerWalkinModal">Register Walk-in Patient</button>
-  </section>
+  <nav class="sa-tabs" aria-label="Filter by physician">
+    <a href="?" class="sa-tab<?= !$physicianFilter ? ' is-active' : '' ?>">All <span class="sa-count"><?= $tabCounts['all'] ?></span></a>
+    <?php foreach ($physicians as $physician): ?>
+      <?php $pid = (int) $physician['UserID']; ?>
+      <a href="?physician=<?= $pid ?>" class="sa-tab<?= $physicianFilter === $pid ? ' is-active' : '' ?>">Dr. <?= htmlspecialchars($physician['LastName']) ?> <span class="sa-count"><?= $tabCounts[$pid] ?? 0 ?></span></a>
+    <?php endforeach; ?>
+  </nav>
 
-  <section class="portal-section">
-    <div class="portal-heading"><div><span class="section-kicker">Today's line</span><h2>Queue</h2></div></div>
-    <div id="queueListContainer"><?= $queueListHtml ?></div>
-  </section>
+  <div id="queueListContainer"><?= $queueHtml ?></div>
 </div></main>
 
 <div class="modal-overlay" id="registerWalkinModal">
   <div class="modal-box">
     <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
     <h2>Register Walk-in Patient</h2>
+    <?php if ($errors && $walkInHasData): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
     <form class="registration-form" method="post">
-      <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+      <input type="hidden" name="csrf_token" value="<?= $csrf ?>">
       <input type="hidden" name="form_type" value="register_walkin">
       <div class="form-stack form-cols-2">
         <label>First name<input type="text" name="first_name" value="<?= htmlspecialchars($walkInValues['first_name']) ?>" required></label>
@@ -343,15 +529,25 @@ require __DIR__ . '/../includes/header.php';
         <label>Contact number<input type="text" name="contact_number" value="<?= htmlspecialchars($walkInValues['contact_number']) ?>" required></label>
         <label>Email <span class="optional">(optional)</span><input type="email" name="email" value="<?= htmlspecialchars($walkInValues['email']) ?>"></label>
       </div>
-      <div class="form-stack">
+      <div class="form-stack form-cols-2">
         <label>Physician <span class="optional">(optional)</span>
           <select name="physician_id">
             <option value="">No preference</option>
             <?php foreach ($physicians as $physician): ?>
-              <option value="<?= (int) $physician['UserID'] ?>" <?= $walkInValues['physician_id'] === (string) $physician['UserID'] ? 'selected' : '' ?>>Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></option>
+              <option value="<?= (int) $physician['UserID'] ?>" <?= $walkInValues['physician_id'] === (string) $physician['UserID'] || (!$walkInHasData && $physicianFilter === (int) $physician['UserID']) ? 'selected' : '' ?>>Dr. <?= htmlspecialchars($physician['FirstName'] . ' ' . $physician['LastName']) ?></option>
             <?php endforeach; ?>
           </select>
         </label>
+        <label>Priority <span class="optional">(goes ahead of the line)</span>
+          <select name="priority">
+            <option value="">None</option>
+            <?php foreach (PRIORITY_OPTIONS as $option): ?>
+              <option <?= $walkInValues['priority'] === $option ? 'selected' : '' ?>><?= $option ?></option>
+            <?php endforeach; ?>
+          </select>
+        </label>
+      </div>
+      <div class="form-stack">
         <label>Reason for visit <span class="optional">(optional)</span><textarea name="concern" rows="3"><?= htmlspecialchars($walkInValues['concern']) ?></textarea></label>
       </div>
       <button type="submit" class="btn btn-primary btn-block">Add to Queue</button>
@@ -361,35 +557,23 @@ require __DIR__ . '/../includes/header.php';
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  // Event-delegated so it keeps working on buttons that arrive later via the
-  // auto-refresh below (a direct querySelectorAll/addEventListener pass would
-  // only ever see the buttons present at page load).
-  document.addEventListener('click', function (e) {
-    var btn = e.target.closest('.view-concern-btn');
-    if (!btn) return;
-    var panel = document.getElementById(btn.getAttribute('data-target'));
-    if (!panel) return;
-    panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
-  });
-
-  <?php if ($walkInHasData): ?>
-  window.hqOpenModal(document.getElementById('registerWalkinModal'));
-  <?php endif; ?>
-
-  // Auto-refresh the queue list so front-desk staff see new walk-ins and
-  // changes made by other staff without manually reloading the page. Skipped
-  // whenever a reschedule panel is open, so it never wipes out an in-progress
-  // edit.
-  var queueListContainer = document.getElementById('queueListContainer');
-  if (queueListContainer) {
-    setInterval(function () {
-      if (queueListContainer.querySelector('form[id^="resched-"][style*="flex"]')) return;
-      fetch(window.location.href, { headers: { 'X-Requested-With': 'fetch' } })
-        .then(function (res) { return res.text(); })
-        .then(function (html) { queueListContainer.innerHTML = html; })
-        .catch(function () { /* silent -- try again on the next tick */ });
-    }, 20000);
+  // Reopen after a failed submit, or open straight away when arriving from
+  // the dashboard's "Register walk-in" link (#walk-in).
+  if (<?= $walkInHasData ? 'true' : 'false' ?> || window.location.hash === '#walk-in') {
+    window.hqOpenModal(document.getElementById('registerWalkinModal'));
   }
+
+  // Auto-refresh the queue so staff see new walk-ins and changes made at
+  // other desks. Skipped while the "Finished today" list is open.
+  var container = document.getElementById('queueListContainer');
+  setInterval(function () {
+    var finished = container.querySelector('.qm-finished');
+    if (finished && finished.open) return;
+    fetch(window.location.href, { headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.text(); })
+      .then(function (html) { container.innerHTML = html; })
+      .catch(function () { /* try again next tick */ });
+  }, 20000);
 });
 </script>
 
