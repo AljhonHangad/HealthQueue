@@ -172,6 +172,38 @@ if ($errors) {
         $old = $_POST;
     }
 }
+// Consultation History card: the 5 most recent completed consultations with
+// a preview of the physician's latest finalized notes. The full list lives
+// on the Medical Records page.
+$recentConsultations = [];
+$consultationTotal = 0;
+if ($pdo) {
+    try {
+        $stmt = $pdo->prepare(
+            "SELECT a.AppointmentID, a.AppointmentDate, c.ClinicName, u.FirstName, u.LastName,
+                    (SELECT v.ClinicalNotes
+                     FROM Consultations cons
+                     JOIN ConsultationVersions v ON v.ConsultationID = cons.ConsultationID
+                     WHERE cons.AppointmentID = a.AppointmentID AND v.Status <> 'Draft'
+                     ORDER BY v.RevisionNumber DESC LIMIT 1) AS LatestNotes
+             FROM Appointments a
+             JOIN Clinic c ON c.ClinicID = a.ClinicID
+             JOIN Users u ON u.UserID = a.PhysicianID
+             WHERE a.PatientID = ? AND a.Status = 'Completed'
+             ORDER BY a.AppointmentDate DESC, a.AppointmentTime DESC
+             LIMIT 5"
+        );
+        $stmt->execute([$user['UserID']]);
+        $recentConsultations = $stmt->fetchAll();
+
+        $countStmt = $pdo->prepare("SELECT COUNT(*) FROM Appointments WHERE PatientID = ? AND Status = 'Completed'");
+        $countStmt->execute([$user['UserID']]);
+        $consultationTotal = (int) $countStmt->fetchColumn();
+    } catch (PDOException $e) {
+        error_log('Profile consultation history load failed: ' . $e->getMessage());
+    }
+}
+
 $formValue = function (string $postKey, ?string $current) use ($old): string {
     return htmlspecialchars((string) ($old[$postKey] ?? $current ?? ''));
 };
@@ -258,6 +290,36 @@ require __DIR__ . '/../includes/header.php';
           </div>
         </div>
         <a href="<?= HQ_BASE_URL ?>/patient/medical-records.php" class="text-link" style="display:inline-block;margin-top:14px;">Manage medical records <span>&rarr;</span></a>
+      </div>
+
+      <div class="info-card">
+        <div class="info-card-header">
+          <h2>Consultation History<?php if ($consultationTotal): ?> <span style="color:var(--slate-400);font-weight:600;font-size:.8em;">(<?= $consultationTotal ?>)</span><?php endif; ?></h2>
+          <?php if ($consultationTotal > count($recentConsultations)): ?>
+            <a href="<?= HQ_BASE_URL ?>/patient/medical-records.php" class="text-link">View all <span>&rarr;</span></a>
+          <?php endif; ?>
+        </div>
+        <?php if ($recentConsultations): ?>
+          <div class="compact-list">
+            <?php foreach ($recentConsultations as $item): ?>
+              <?php
+              $notes = trim(preg_replace('/\s+/', ' ', (string) $item['LatestNotes']));
+              if (mb_strlen($notes) > 110) $notes = mb_substr($notes, 0, 110) . '…';
+              ?>
+              <article>
+                <div>
+                  <strong><?= htmlspecialchars($item['ClinicName']) ?></strong>
+                  <span>Dr. <?= htmlspecialchars($item['FirstName'] . ' ' . $item['LastName']) ?> &middot; <?= htmlspecialchars(date('M j, Y', strtotime($item['AppointmentDate']))) ?></span>
+                  <?php if ($notes !== ''): ?><span><?= htmlspecialchars($notes) ?></span><?php endif; ?>
+                </div>
+                <button type="button" class="text-link" data-view-record="<?= (int) $item['AppointmentID'] ?>">View <span>&rarr;</span></button>
+              </article>
+            <?php endforeach; ?>
+          </div>
+        <?php else: ?>
+          <p class="admin-empty">No consultations yet.</p>
+          <a href="<?= HQ_BASE_URL ?>/patient/clinics.php" class="btn btn-primary btn-sm" style="margin-top:12px;">Book an appointment</a>
+        <?php endif; ?>
       </div>
     </div>
   </div>
@@ -351,5 +413,49 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 </script>
 <?php endif; ?>
+
+<div class="modal-overlay" id="viewRecordModal">
+  <div class="modal-box modal-box-wide" style="max-height:85vh;">
+    <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
+    <div id="viewRecordContent"><p class="admin-empty">Loading…</p></div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  // Same consultation-record modal as the Medical Records page: the record
+  // (and its feedback form) is rendered by patient/consultation.php.
+  var viewRecordModal = document.getElementById('viewRecordModal');
+  var viewRecordContent = document.getElementById('viewRecordContent');
+
+  document.querySelectorAll('[data-view-record]').forEach(function (trigger) {
+    trigger.addEventListener('click', function () {
+      viewRecordContent.innerHTML = '<p class="admin-empty">Loading…</p>';
+      window.hqOpenModal(viewRecordModal);
+      fetch('<?= HQ_BASE_URL ?>/patient/consultation.php?appointment_id=' + encodeURIComponent(trigger.getAttribute('data-view-record')), { headers: { 'X-Requested-With': 'fetch' } })
+        .then(function (res) { return res.text(); })
+        .then(function (html) { viewRecordContent.innerHTML = html; })
+        .catch(function () {
+          viewRecordContent.innerHTML = '<p class="form-message error" role="alert">We could not load this record. Please try again.</p>';
+        });
+    });
+  });
+
+  viewRecordContent.addEventListener('submit', function (e) {
+    if (!e.target.matches('.consultation-feedback-form')) return;
+    e.preventDefault();
+    var form = e.target;
+    fetch(form.action, { method: 'POST', body: new FormData(form), headers: { 'X-Requested-With': 'fetch' } })
+      .then(function (res) { return res.text(); })
+      .then(function (html) { viewRecordContent.innerHTML = html; })
+      .catch(function () {
+        var err = document.createElement('p');
+        err.className = 'form-message error';
+        err.textContent = 'We could not save your feedback. Please try again.';
+        form.prepend(err);
+      });
+  });
+});
+</script>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>
