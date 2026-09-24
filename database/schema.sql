@@ -21,6 +21,12 @@ CREATE TABLE IF NOT EXISTS Clinic (
     BaseConsultationFee DECIMAL(10,2)  NOT NULL DEFAULT 0.00,
     PhotoUrl             VARCHAR(255)  NULL,
     Description          TEXT          NULL,
+    -- Comma-separated list shown as tags/filters on the patient clinic browser.
+    Specialties          VARCHAR(255)  NULL,
+    -- Opening hours: ISO weekdays (1 = Monday ... 7 = Sunday), comma-separated.
+    OpenDays             VARCHAR(20)   NOT NULL DEFAULT '1,2,3,4,5,6',
+    OpenTime             TIME          NOT NULL DEFAULT '08:00:00',
+    CloseTime            TIME          NOT NULL DEFAULT '17:00:00',
     RegistrationDate    DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     DeletedAt           DATETIME       NULL,
     Status               VARCHAR(20)   NOT NULL DEFAULT 'Active',
@@ -359,6 +365,12 @@ ALTER TABLE Users
     ADD COLUMN IF NOT EXISTS Allergies              VARCHAR(500) NULL,
     ADD COLUMN IF NOT EXISTS EmergencyContactName   VARCHAR(100) NULL,
     ADD COLUMN IF NOT EXISTS EmergencyContactNumber VARCHAR(20)  NULL;
+
+ALTER TABLE Clinic
+    ADD COLUMN IF NOT EXISTS Specialties VARCHAR(255) NULL AFTER Description,
+    ADD COLUMN IF NOT EXISTS OpenDays    VARCHAR(20)  NOT NULL DEFAULT '1,2,3,4,5,6' AFTER Specialties,
+    ADD COLUMN IF NOT EXISTS OpenTime    TIME         NOT NULL DEFAULT '08:00:00' AFTER OpenDays,
+    ADD COLUMN IF NOT EXISTS CloseTime   TIME         NOT NULL DEFAULT '17:00:00' AFTER OpenTime;
 
 INSERT INTO Clinic (ClinicName, Address, ContactNumber, BaseConsultationFee, PhotoUrl)
 VALUES

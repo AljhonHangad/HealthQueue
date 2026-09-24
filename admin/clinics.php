@@ -13,7 +13,8 @@ $flash = '';
 $showArchived = isset($_GET['archived']);
 $editId = filter_input(INPUT_GET, 'edit', FILTER_VALIDATE_INT) ?: null;
 $search = trim((string) ($_GET['q'] ?? ''));
-$values = ['clinic_name' => '', 'address' => '', 'contact_number' => '', 'base_consultation_fee' => '', 'description' => ''];
+$values = ['clinic_name' => '', 'address' => '', 'contact_number' => '', 'base_consultation_fee' => '', 'description' => '', 'specialties' => '', 'open_days' => [1, 2, 3, 4, 5, 6], 'open_time' => '08:00', 'close_time' => '17:00'];
+$weekdayLabels = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => 'Sat', 7 => 'Sun'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
@@ -27,12 +28,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $values['contact_number'] = trim((string) ($_POST['contact_number'] ?? ''));
         $values['base_consultation_fee'] = trim((string) ($_POST['base_consultation_fee'] ?? ''));
         $values['description'] = trim((string) ($_POST['description'] ?? ''));
+        // Normalise "general, Pediatrics ," into "General, Pediatrics".
+        $specialtyList = array_map(static fn(string $s): string => ucfirst(trim($s)), explode(',', (string) ($_POST['specialties'] ?? '')));
+        $values['specialties'] = implode(', ', array_unique(array_filter($specialtyList, 'strlen')));
+        $values['open_days'] = array_values(array_intersect(array_keys($weekdayLabels), array_map('intval', (array) ($_POST['open_days'] ?? []))));
+        $values['open_time'] = (string) ($_POST['open_time'] ?? '');
+        $values['close_time'] = (string) ($_POST['close_time'] ?? '');
 
         if ($values['clinic_name'] === '') $errors[] = 'Clinic name is required.';
         if ($values['address'] === '') $errors[] = 'Address is required.';
         if ($values['contact_number'] === '') $errors[] = 'Contact number is required.';
         if (!is_numeric($values['base_consultation_fee']) || (float) $values['base_consultation_fee'] < 0) {
             $errors[] = 'Consultation fee must be a valid non-negative amount.';
+        }
+        if (mb_strlen($values['specialties']) > 255) $errors[] = 'Specialties must be 255 characters or fewer.';
+        if (!$values['open_days']) $errors[] = 'Select at least one opening day.';
+        if (!preg_match('/^\d{2}:\d{2}$/', $values['open_time']) || !preg_match('/^\d{2}:\d{2}$/', $values['close_time'])) {
+            $errors[] = 'Please enter valid opening and closing times.';
+        } elseif ($values['close_time'] <= $values['open_time']) {
+            $errors[] = 'Closing time must be later than opening time.';
         }
 
         $newPhotoFilename = null;
@@ -65,8 +79,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $oldPhotoStmt->execute([$clinicId]);
                     $oldPhoto = $oldPhotoStmt->fetchColumn();
 
-                    $sql = 'UPDATE Clinic SET ClinicName = ?, Address = ?, ContactNumber = ?, BaseConsultationFee = ?, Description = ?';
-                    $params = [$values['clinic_name'], $values['address'], $values['contact_number'], (float) $values['base_consultation_fee'], $values['description'] ?: null];
+                    $sql = 'UPDATE Clinic SET ClinicName = ?, Address = ?, ContactNumber = ?, BaseConsultationFee = ?, Description = ?, Specialties = ?, OpenDays = ?, OpenTime = ?, CloseTime = ?';
+                    $params = [$values['clinic_name'], $values['address'], $values['contact_number'], (float) $values['base_consultation_fee'], $values['description'] ?: null, $values['specialties'] ?: null, implode(',', $values['open_days']), $values['open_time'], $values['close_time']];
                     if ($newPhotoFilename) {
                         $sql .= ', PhotoUrl = ?';
                         $params[] = $newPhotoFilename;
@@ -85,8 +99,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $flash = 'Clinic updated.';
                     }
                 } else {
-                    $stmt = $pdo->prepare('INSERT INTO Clinic (ClinicName, Address, ContactNumber, BaseConsultationFee, Description, PhotoUrl) VALUES (?, ?, ?, ?, ?, ?)');
-                    $stmt->execute([$values['clinic_name'], $values['address'], $values['contact_number'], (float) $values['base_consultation_fee'], $values['description'] ?: null, $newPhotoFilename]);
+                    $stmt = $pdo->prepare('INSERT INTO Clinic (ClinicName, Address, ContactNumber, BaseConsultationFee, Description, Specialties, OpenDays, OpenTime, CloseTime, PhotoUrl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                    $stmt->execute([$values['clinic_name'], $values['address'], $values['contact_number'], (float) $values['base_consultation_fee'], $values['description'] ?: null, $values['specialties'] ?: null, implode(',', $values['open_days']), $values['open_time'], $values['close_time'], $newPhotoFilename]);
                     $newClinicId = (int) $pdo->lastInsertId();
 
                     if ($newPhotoFilename && !move_uploaded_file($photoFile['tmp_name'], $uploadDir . '/' . $newPhotoFilename)) {
@@ -176,7 +190,7 @@ if ($pdo) {
         $clinics = $stmt->fetchAll();
 
         if ($editId) {
-            $editStmt = $pdo->prepare('SELECT ClinicID, ClinicName, Address, ContactNumber, BaseConsultationFee, Description, PhotoUrl FROM Clinic WHERE ClinicID = ?');
+            $editStmt = $pdo->prepare('SELECT ClinicID, ClinicName, Address, ContactNumber, BaseConsultationFee, Description, Specialties, OpenDays, OpenTime, CloseTime, PhotoUrl FROM Clinic WHERE ClinicID = ?');
             $editStmt->execute([$editId]);
             $editingClinic = $editStmt->fetch();
             if ($editingClinic) {
@@ -186,6 +200,10 @@ if ($pdo) {
                     'contact_number' => $editingClinic['ContactNumber'],
                     'base_consultation_fee' => number_format((float) $editingClinic['BaseConsultationFee'], 2, '.', ''),
                     'description' => $editingClinic['Description'] ?? '',
+                    'specialties' => $editingClinic['Specialties'] ?? '',
+                    'open_days' => array_map('intval', explode(',', $editingClinic['OpenDays'])),
+                    'open_time' => substr($editingClinic['OpenTime'], 0, 5),
+                    'close_time' => substr($editingClinic['CloseTime'], 0, 5),
                 ];
             }
         }
@@ -218,6 +236,21 @@ require __DIR__ . '/../includes/header.php';
       <div class="form-stack form-cols-2">
         <label>Contact number<input type="tel" name="contact_number" value="<?= htmlspecialchars($values['contact_number']) ?>" required></label>
         <label>Consultation fee (PHP)<input type="number" step="0.01" min="0" name="base_consultation_fee" value="<?= htmlspecialchars($values['base_consultation_fee']) ?>" required></label>
+      </div>
+      <div class="form-stack">
+        <label>Specialties <span class="optional">(comma-separated, e.g. General, Pediatrics, Dental)</span><input name="specialties" value="<?= htmlspecialchars($values['specialties']) ?>" maxlength="255" placeholder="General, Pediatrics"></label>
+        <div>
+          <span style="display:block;margin-bottom:6px;color:var(--slate-700);font-size:13px;font-weight:700;">Open days</span>
+          <div style="display:flex;flex-wrap:wrap;gap:8px 14px;">
+            <?php foreach ($weekdayLabels as $dayNum => $dayLabel): ?>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;"><input type="checkbox" name="open_days[]" value="<?= $dayNum ?>"<?= in_array($dayNum, $values['open_days'], true) ? ' checked' : '' ?>><?= $dayLabel ?></label>
+            <?php endforeach; ?>
+          </div>
+        </div>
+      </div>
+      <div class="form-stack form-cols-2">
+        <label>Opening time<input type="time" name="open_time" value="<?= htmlspecialchars($values['open_time']) ?>" required></label>
+        <label>Closing time<input type="time" name="close_time" value="<?= htmlspecialchars($values['close_time']) ?>" required></label>
       </div>
       <div class="form-stack">
         <label>Description <span class="optional">(shown on the clinic's public profile)</span><textarea name="description" rows="4" placeholder="A short description of this clinic for patients."><?= htmlspecialchars($values['description']) ?></textarea></label>

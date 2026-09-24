@@ -5,39 +5,131 @@ require_once __DIR__ . '/../includes/auth.php';
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
 
+// Same rough per-patient estimate the dashboard and Live Queue pages use.
+const MINUTES_PER_PATIENT = 15;
+
 $user = currentUser();
 $pdo = getDbConnection();
 $search = trim((string) ($_GET['q'] ?? ''));
+$openOnly = ($_GET['open'] ?? '') === '1';
+$specFilter = trim((string) ($_GET['spec'] ?? ''));
+$sortOptions = ['wait' => 'Shortest wait', 'fee' => 'Lowest fee', 'name' => 'Name (A–Z)'];
+$sort = isset($sortOptions[$_GET['sort'] ?? '']) ? $_GET['sort'] : 'wait';
+
 $clinics = [];
+$allSpecialties = [];
 $dataError = null;
+$dayShort = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri', 6 => 'Sat', 7 => 'Sun'];
+$dayLong = [1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 => 'Friday', 6 => 'Saturday', 7 => 'Sunday'];
+
+$formatTime = static function (string $time): string {
+    $ts = strtotime($time);
+    return date('i', $ts) === '00' ? date('g A', $ts) : date('g:i A', $ts);
+};
 
 if ($pdo) {
     try {
-        $sql = "SELECT ClinicID, ClinicName, Address, BaseConsultationFee, PhotoUrl, Description FROM Clinic WHERE archived = 0 AND Status = 'Active'";
-        $params = [];
-        if ($search !== '') {
-            $sql .= ' AND (ClinicName LIKE ? OR Address LIKE ?)';
-            $params[] = "%{$search}%";
-            $params[] = "%{$search}%";
-        }
-        $sql .= ' ORDER BY ClinicName';
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-        $clinics = $stmt->fetchAll();
+        // "Now" comes from MySQL so open/closed matches the same clock the
+        // queue uses (PHP's configured timezone may differ from the server's).
+        $now = new DateTimeImmutable((string) $pdo->query('SELECT NOW()')->fetchColumn());
+        $today = (int) $now->format('N');
+        $nowTime = $now->format('H:i:s');
 
-        foreach ($clinics as &$clinic) {
-            $ratingStmt = $pdo->prepare('SELECT COALESCE(AVG(Rating), 0) AS avg_rating, COUNT(*) AS review_count FROM Feedback WHERE ClinicID = ?');
-            $ratingStmt->execute([$clinic['ClinicID']]);
-            $rating = $ratingStmt->fetch();
-            $clinic['AvgRating'] = (float) $rating['avg_rating'];
-            $clinic['ReviewCount'] = (int) $rating['review_count'];
+        $sql = "SELECT ClinicID, ClinicName, Address, BaseConsultationFee, PhotoUrl, Specialties, OpenDays, OpenTime, CloseTime
+                FROM Clinic WHERE archived = 0 AND Status = 'Active'";
+        $stmt = $pdo->query($sql);
+        $rows = $stmt->fetchAll();
+
+        $queueCounts = $pdo->query(
+            "SELECT ClinicID, COUNT(*) FROM Queue
+             WHERE DATE(CreatedAt) = CURDATE() AND Status IN ('Waiting', 'Calling')
+             GROUP BY ClinicID"
+        )->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        foreach ($rows as $row) {
+            $specialties = array_values(array_filter(array_map('trim', explode(',', (string) $row['Specialties'])), 'strlen'));
+            foreach ($specialties as $spec) {
+                $allSpecialties[$spec] = ($allSpecialties[$spec] ?? 0) + 1;
+            }
+
+            $openDays = array_map('intval', explode(',', (string) $row['OpenDays']));
+            $isOpen = in_array($today, $openDays, true) && $nowTime >= $row['OpenTime'] && $nowTime < $row['CloseTime'];
+
+            if ($isOpen) {
+                $hoursLabel = 'Open · until ' . $formatTime($row['CloseTime']);
+                $nextOpenLabel = null;
+            } elseif (in_array($today, $openDays, true) && $nowTime < $row['OpenTime']) {
+                $hoursLabel = 'Closed · opens ' . $formatTime($row['OpenTime']);
+                $nextOpenLabel = 'Opens today at ' . $formatTime($row['OpenTime']);
+            } else {
+                $hoursLabel = 'Closed';
+                $nextOpenLabel = 'Hours not available';
+                for ($offset = 1; $offset <= 7; $offset++) {
+                    $day = ($today + $offset - 1) % 7 + 1;
+                    if (in_array($day, $openDays, true)) {
+                        $hoursLabel = 'Closed · opens ' . ($offset === 1 ? '' : $dayShort[$day] . ' ') . $formatTime($row['OpenTime']);
+                        $nextOpenLabel = 'Book for ' . ($offset === 1 ? 'tomorrow' : $dayLong[$day]);
+                        break;
+                    }
+                }
+            }
+
+            $inQueue = (int) ($queueCounts[$row['ClinicID']] ?? 0);
+            $waitMinutes = $inQueue * MINUTES_PER_PATIENT;
+
+            $words = preg_split('/\s+/', trim($row['ClinicName']));
+            $initials = strtoupper(mb_substr($words[0] ?? '', 0, 1) . mb_substr($words[1] ?? '', 0, 1));
+
+            $photo = !empty($row['PhotoUrl']) && is_file(__DIR__ . '/../assets/uploads/clinics/' . basename($row['PhotoUrl']))
+                ? $row['PhotoUrl'] : null;
+
+            $clinics[] = $row + [
+                'SpecialtyList' => $specialties,
+                'IsOpen'        => $isOpen,
+                'HoursLabel'    => $hoursLabel,
+                'NextOpenLabel' => $nextOpenLabel,
+                'InQueue'       => $inQueue,
+                'WaitMinutes'   => $waitMinutes,
+                'WaitTone'      => $waitMinutes <= 30 ? 'short' : ($waitMinutes <= 60 ? 'medium' : 'long'),
+                'Initials'      => $initials,
+                'Photo'         => $photo,
+            ];
         }
-        unset($clinic);
+
+        // Filters run in PHP -- the clinic directory is small, and "open now"
+        // depends on the computed hours above anyway.
+        $clinics = array_values(array_filter($clinics, static function (array $c) use ($search, $openOnly, $specFilter): bool {
+            if ($openOnly && !$c['IsOpen']) return false;
+            if ($specFilter !== '' && !in_array(mb_strtolower($specFilter), array_map('mb_strtolower', $c['SpecialtyList']), true)) return false;
+            if ($search !== '') {
+                $haystack = mb_strtolower($c['ClinicName'] . ' ' . $c['Address'] . ' ' . implode(' ', $c['SpecialtyList']));
+                if (!str_contains($haystack, mb_strtolower($search))) return false;
+            }
+            return true;
+        }));
+
+        usort($clinics, static function (array $a, array $b) use ($sort): int {
+            if ($sort === 'fee') return [(float) $a['BaseConsultationFee'], $a['ClinicName']] <=> [(float) $b['BaseConsultationFee'], $b['ClinicName']];
+            if ($sort === 'name') return strcasecmp($a['ClinicName'], $b['ClinicName']);
+            // Shortest wait: open clinics first, then by current wait.
+            return [!$a['IsOpen'], $a['WaitMinutes'], $a['ClinicName']] <=> [!$b['IsOpen'], $b['WaitMinutes'], $b['ClinicName']];
+        });
+
+        arsort($allSpecialties);
+        $allSpecialties = array_slice(array_keys($allSpecialties), 0, 6);
     } catch (PDOException $e) {
         error_log('Clinics browse failed: ' . $e->getMessage());
         $dataError = 'Clinics are temporarily unavailable.';
     }
 }
+
+// Builds a link to this page with one filter changed, keeping the others.
+$filterUrl = static function (array $changes) use ($search, $openOnly, $specFilter, $sort): string {
+    $params = array_merge(['q' => $search, 'open' => $openOnly ? '1' : '', 'spec' => $specFilter, 'sort' => $sort], $changes);
+    $params = array_filter($params, static fn($v): bool => $v !== '' && $v !== null);
+    if (($params['sort'] ?? '') === 'wait') unset($params['sort']);
+    return '?' . http_build_query($params);
+};
 
 $pageTitle = 'Clinics — HealthQueue';
 require __DIR__ . '/../includes/header.php';
@@ -49,34 +141,85 @@ require __DIR__ . '/../includes/header.php';
   <?php if ($dataError): ?><p class="form-message error" role="alert"><?= htmlspecialchars($dataError) ?></p><?php endif; ?>
 
   <section class="portal-section">
-    <form method="get" class="admin-search" style="max-width:420px;margin-bottom:20px;">
-      <input type="text" name="q" value="<?= htmlspecialchars($search) ?>" placeholder="Search by clinic name or address...">
-      <button type="submit" class="btn btn-outline btn-sm">Search</button>
+    <form method="get" class="cb-toolbar">
+      <?php if ($openOnly): ?><input type="hidden" name="open" value="1"><?php endif; ?>
+      <?php if ($specFilter !== ''): ?><input type="hidden" name="spec" value="<?= htmlspecialchars($specFilter) ?>"><?php endif; ?>
+      <label class="cb-search">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="search" name="q" value="<?= htmlspecialchars($search) ?>" placeholder="Search clinics, specialties, or areas" aria-label="Search clinics">
+      </label>
+      <select name="sort" class="cb-sort" aria-label="Sort clinics" onchange="this.form.submit()">
+        <?php foreach ($sortOptions as $key => $label): ?>
+          <option value="<?= $key ?>"<?= $sort === $key ? ' selected' : '' ?>><?= $label ?></option>
+        <?php endforeach; ?>
+      </select>
     </form>
 
+    <div class="cb-chips">
+      <a href="<?= htmlspecialchars($filterUrl(['open' => $openOnly ? '' : '1'])) ?>" class="cb-chip<?= $openOnly ? ' is-active' : '' ?>">Open now</a>
+      <?php foreach ($allSpecialties as $spec): ?>
+        <?php $active = mb_strtolower($spec) === mb_strtolower($specFilter); ?>
+        <a href="<?= htmlspecialchars($filterUrl(['spec' => $active ? '' : $spec])) ?>" class="cb-chip<?= $active ? ' is-active' : '' ?>"><?= htmlspecialchars($spec) ?></a>
+      <?php endforeach; ?>
+    </div>
+
+    <p class="cb-count">Showing <?= count($clinics) ?> clinic<?= count($clinics) === 1 ? '' : 's' ?><?= ($search !== '' || $openOnly || $specFilter !== '') ? ' · <a href="?" class="text-link">Clear filters</a>' : '' ?></p>
+
     <?php if ($clinics): ?>
-      <div class="portal-clinics">
+      <div class="cb-grid">
         <?php foreach ($clinics as $clinic): ?>
-          <article class="portal-clinic-card">
-            <?php if (!empty($clinic['PhotoUrl'])): ?>
-              <img src="<?= HQ_BASE_URL ?>/assets/uploads/clinics/<?= htmlspecialchars($clinic['PhotoUrl']) ?>" alt="" class="portal-clinic-photo">
-            <?php else: ?>
-              <div class="portal-clinic-mark">+</div>
-            <?php endif; ?>
-            <h3><?= htmlspecialchars($clinic['ClinicName']) ?></h3>
-            <p><?= htmlspecialchars($clinic['Address']) ?></p>
-            <?php if ($clinic['ReviewCount'] > 0): ?>
-              <p style="color:#f59e0b;font-weight:700;margin:2px 0 8px;font-size:13px;">★ <?= number_format($clinic['AvgRating'], 1) ?> <span style="color:var(--slate-400);font-weight:400;">(<?= $clinic['ReviewCount'] ?>)</span></p>
-            <?php endif; ?>
-            <div>
-              <span>From PHP <?= number_format((float) $clinic['BaseConsultationFee'], 2) ?></span>
-              <a href="<?= HQ_BASE_URL ?>/patient/clinic-detail.php?clinic_id=<?= (int) $clinic['ClinicID'] ?>">View details</a>
+          <?php
+            $detailUrl = HQ_BASE_URL . '/patient/clinic-detail.php?clinic_id=' . (int) $clinic['ClinicID'];
+            $bookUrl = HQ_BASE_URL . '/patient/book-appointment.php?clinic=' . (int) $clinic['ClinicID'];
+            $tint = $clinic['IsOpen'] ? 'tint-' . ((int) $clinic['ClinicID'] % 5) : 'tint-closed';
+          ?>
+          <article class="cb-card">
+            <a href="<?= $detailUrl ?>" class="cb-cover <?= $tint ?>" aria-label="View <?= htmlspecialchars($clinic['ClinicName']) ?>">
+              <?php if ($clinic['Photo']): ?>
+                <img src="<?= HQ_BASE_URL ?>/assets/uploads/clinics/<?= htmlspecialchars($clinic['Photo']) ?>" alt="">
+              <?php else: ?>
+                <span class="cb-initials"><?= htmlspecialchars($clinic['Initials']) ?></span>
+              <?php endif; ?>
+              <span class="cb-status <?= $clinic['IsOpen'] ? 'is-open' : 'is-closed' ?>"><?= htmlspecialchars($clinic['HoursLabel']) ?></span>
+            </a>
+            <div class="cb-body">
+              <h3><a href="<?= $detailUrl ?>"><?= htmlspecialchars($clinic['ClinicName']) ?></a></h3>
+              <p class="cb-address">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+                <?= htmlspecialchars($clinic['Address']) ?>
+              </p>
+              <?php if ($clinic['SpecialtyList']): ?>
+                <div class="cb-tags">
+                  <?php foreach (array_slice($clinic['SpecialtyList'], 0, 3) as $spec): ?><span><?= htmlspecialchars($spec) ?></span><?php endforeach; ?>
+                </div>
+              <?php endif; ?>
+
+              <?php if ($clinic['IsOpen']): ?>
+                <div class="cb-queue wait-<?= $clinic['WaitTone'] ?>">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                  <?= $clinic['InQueue'] === 0 ? 'No queue · walk right in' : $clinic['InQueue'] . ' in queue · ~' . $clinic['WaitMinutes'] . ' min' ?>
+                </div>
+              <?php else: ?>
+                <div class="cb-queue wait-closed">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+                  <?= htmlspecialchars($clinic['NextOpenLabel']) ?>
+                </div>
+              <?php endif; ?>
+
+              <div class="cb-footer">
+                <span class="cb-fee">from <strong>₱<?= number_format((float) $clinic['BaseConsultationFee']) ?></strong></span>
+                <?php if ($clinic['IsOpen'] && $clinic['WaitTone'] === 'short'): ?>
+                  <a href="<?= $bookUrl ?>" class="btn btn-primary btn-sm">Book now</a>
+                <?php else: ?>
+                  <a href="<?= $bookUrl ?>" class="btn btn-outline btn-sm">Book</a>
+                <?php endif; ?>
+              </div>
             </div>
           </article>
         <?php endforeach; ?>
       </div>
     <?php else: ?>
-      <p class="admin-empty">No clinics match your search.</p>
+      <p class="admin-empty">No clinics match your filters.</p>
     <?php endif; ?>
   </section>
 </div></main>
