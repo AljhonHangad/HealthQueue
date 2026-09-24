@@ -909,10 +909,10 @@ a { color: inherit; text-decoration: none; }
 .info-card.editing .info-field-value { display: none; }
 .info-card.editing .info-field-input { display: block; }
 .plain-page-header h1 { margin: 0 0 14px; color: var(--slate-900); font-size: 28px; line-height: 1.2; }
-.header-icon-btn { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; color: var(--slate-700); }
+.header-icon-btn { position: relative; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; color: var(--slate-700); }
 .header-icon-btn:hover { background: var(--slate-100); }
-.header-icon-badge { position: absolute; top: 8px; right: 9px; width: 9px; height: 9px; border-radius: 50%; background: #ef4444; border: 2px solid #fff; }
-.header-icon-avatar { display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 50%; background: var(--slate-200); color: var(--slate-600); font-size: 13px; font-weight: 800; overflow: hidden; }
+.header-icon-badge { position: absolute; top: 9px; right: 10px; width: 9px; height: 9px; border-radius: 50%; background: #ef4444; border: 2px solid #fff; }
+.header-icon-avatar { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; background: var(--slate-200); color: var(--slate-600); font-size: 15px; font-weight: 800; overflow: hidden; }
 .header-icon-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .portal-hero .eyebrow { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.14); color: #e0f7fa; }
 .wallet-hero { position: relative; }
@@ -1196,7 +1196,7 @@ button.text-link { background: none; border: none; padding: 0; font-family: inhe
   .admin-topbar { padding: 0 16px; gap: 10px; }
   .admin-topbar-exit { font-size: 13px; }
   .plain-page-header h1 { font-size: 24px; }
-  .header-icon-btn, .header-icon-avatar { width: 34px; height: 34px; }
+  .header-icon-btn, .header-icon-avatar { width: 38px; height: 38px; }
   .queue-hero-card { padding: 20px; }
   .queue-hero-number { font-size: 42px; }
   .clock-card { padding: 18px; }
