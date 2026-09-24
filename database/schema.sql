@@ -305,6 +305,7 @@ CREATE TABLE IF NOT EXISTS MedicalRecords (
     RecordID      INT AUTO_INCREMENT PRIMARY KEY,
     PatientID     INT NOT NULL,
     Title         VARCHAR(150) NOT NULL,
+    Category      VARCHAR(30)  NOT NULL DEFAULT 'Other', -- Lab result, Imaging, Prescription, Medical certificate, Other
     Description   TEXT NULL,
     FilePath      VARCHAR(255) NOT NULL,
     FileType      VARCHAR(50) NOT NULL,
@@ -388,3 +389,6 @@ VALUES
     ('Northgate Family Clinic', '456 Aurora Blvd, Quezon City', '+63 2 8987 6543', 250.00, 'northgate.jpg'),
     ('Bayview Health Hub', '789 Roxas Blvd, Pasay', '+63 2 8555 0102', 350.00, 'bayview.jpg'),
     ('Eastside Wellness Clinic', '321 Marcos Highway, Antipolo', '+63 2 8222 7788', 280.00, 'eastside.jpg');
+
+ALTER TABLE MedicalRecords
+    ADD COLUMN IF NOT EXISTS Category VARCHAR(30) NOT NULL DEFAULT 'Other' AFTER Title;

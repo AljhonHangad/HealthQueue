@@ -107,7 +107,7 @@ if (!$isAjax) {
 
 <?php if (!$isAjax): ?>
 <main class="portal-shell"><div class="container">
-  <a href="<?= HQ_BASE_URL ?>/patient/dashboard.php" class="back-link">&larr; Back to dashboard</a>
+  <a href="<?= HQ_BASE_URL ?>/patient/medical-records.php" class="back-link no-print">&larr; Back to medical records</a>
 <?php endif; ?>
 
   <section class="portal-hero" style="margin-top:18px;">
@@ -143,7 +143,7 @@ if (!$isAjax) {
     </section>
   <?php endif; ?>
 
-  <section class="portal-section" id="ai-summary">
+  <section class="portal-section no-print" id="ai-summary">
     <div class="portal-heading"><div><span class="section-kicker">AI visit summary</span><h2>Plain-language summary of your visit</h2></div></div>
     <?php if ($aiSummary): ?>
       <div class="compact-list">
@@ -163,7 +163,7 @@ if (!$isAjax) {
     <?php endif; ?>
   </section>
 
-  <section class="portal-section">
+  <section class="portal-section no-print">
     <div class="portal-heading"><div><span class="section-kicker">Feedback</span><h2>Rate this visit</h2></div></div>
     <?php if ($flash): ?><p class="form-message success" role="status"><?= htmlspecialchars($flash) ?></p><?php endif; ?>
     <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
@@ -197,6 +197,14 @@ if (!$isAjax) {
   </section>
 <?php if (!$isAjax): ?>
 </div></main>
+
+<?php if (isset($_GET['print'])): ?>
+<script>
+// Opened from Medical Records' "Download PDF": show the browser's print
+// dialog, where the patient can choose "Save as PDF".
+window.addEventListener('load', function () { window.print(); });
+</script>
+<?php endif; ?>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>
 <?php endif; ?>

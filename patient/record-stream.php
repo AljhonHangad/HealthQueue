@@ -35,6 +35,9 @@ if (!is_file($fullPath)) {
 $mimeMap = ['pdf' => 'application/pdf', 'jpg' => 'image/jpeg', 'png' => 'image/png'];
 header('Content-Type: ' . ($mimeMap[$row['FileType']] ?? 'application/octet-stream'));
 header('Content-Length: ' . filesize($fullPath));
-header('Content-Disposition: inline; filename="' . basename($row['FilePath']) . '"');
+// ?download=1 saves the file under its record title; otherwise it opens inline.
+$downloadName = trim(preg_replace('/[^A-Za-z0-9 _.-]+/', '', $row['Title'])) ?: 'medical-record';
+$disposition = isset($_GET['download']) ? 'attachment' : 'inline';
+header('Content-Disposition: ' . $disposition . '; filename="' . $downloadName . '.' . $row['FileType'] . '"');
 header('Cache-Control: private, no-store');
 readfile($fullPath);

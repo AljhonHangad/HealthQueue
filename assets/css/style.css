@@ -1518,3 +1518,60 @@ button.text-link { background: none; border: none; padding: 0; font-family: inhe
   .lq-partner { flex-direction: column; align-items: flex-start; gap: 4px; }
   .lq-partner > span:last-child { text-align: left; padding-left: 18px; }
 }
+
+/* ---------- Print (consultation record "Download PDF") ---------- */
+@media print {
+  .admin-sidebar, .admin-topbar, .admin-sidebar-scrim, .no-print, .site-footer { display: none !important; }
+  .admin-layout, .admin-main { display: block !important; }
+  .portal-shell { padding: 0 !important; background: #fff !important; }
+  .portal-hero { color: #000 !important; background: none !important; border: 1px solid #ccc; }
+  .portal-hero p, .portal-hero .eyebrow { color: #333 !important; background: none !important; }
+}
+
+/* ---------- Patient Medical Records (patient/medical-records.php) ---------- */
+.mr-page { max-width: 980px; }
+.mr-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 22px; }
+.mr-stats > div { padding: 16px 18px; background: #fff; border: 1px solid var(--slate-200); border-radius: var(--radius-md); box-shadow: var(--shadow-sm); }
+.mr-stats span { display: block; color: var(--slate-500); font-size: 13px; }
+.mr-stats strong { display: block; margin-top: 4px; color: var(--slate-900); font-size: 20px; }
+.mr-toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.mr-toolbar .ma-tabs { margin-bottom: 0; }
+.mr-upload-btn { display: inline-flex; align-items: center; gap: 7px; }
+
+.mr-list { overflow: hidden; background: #fff; border: 1px solid var(--slate-200); border-radius: var(--radius-md); }
+.mr-item { display: flex; gap: 16px; padding: 18px 20px; }
+.mr-item + .mr-item, .mr-upload + .mr-item { border-top: 1px solid var(--slate-100); }
+.mr-item:target { background: var(--teal-50); }
+.mr-icon { flex-shrink: 0; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; }
+.mr-icon-blue { background: #dbeafe; color: #1e40af; }
+.mr-icon-green { background: #d7f0d9; color: #166534; }
+.mr-icon-muted { background: var(--slate-50); color: var(--slate-400); }
+.mr-icon-red { background: #fee2e2; color: #b91c1c; }
+.mr-icon-purple { background: #ede9fe; color: #5b21b6; }
+.mr-body { flex: 1; min-width: 0; }
+.mr-body > strong, .mr-title-row strong { color: var(--slate-900); font-size: 15.5px; }
+.mr-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.mr-date { flex-shrink: 0; color: var(--slate-500); font-size: 13px; }
+.mr-sub { margin: 2px 0 0; color: var(--slate-500); font-size: 13.5px; }
+.mr-text { margin: 6px 0 0; color: var(--slate-700); font-size: 14px; }
+.mr-item.is-ended .mr-title-row strong, .mr-item.is-ended .mr-sub { color: var(--slate-500); }
+.mr-note { margin: 10px 4px 0; color: var(--slate-400); font-size: 12.5px; }
+
+.mr-upload { padding: 16px; }
+.mr-dropzone { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 30px 16px; border: 1.5px dashed var(--slate-300, #cbd5e1); border-radius: var(--radius-sm); color: var(--teal-700); text-align: center; cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+.mr-dropzone:hover, .mr-dropzone.is-dragging { background: var(--teal-50); border-color: var(--teal-600); }
+.mr-dropzone input[type="file"] { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.mr-dropzone strong { color: var(--slate-900); font-size: 15px; font-weight: 600; }
+.mr-dropzone strong u { color: var(--teal-700); }
+.mr-dropzone span { color: var(--slate-500); font-size: 13px; }
+.mr-upload-fields { margin-top: 16px; }
+.mr-upload-fields .form-stack { margin-bottom: 12px; }
+.mr-upload-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.mr-empty-line { margin: 0; padding: 18px 20px; border-top: 1px solid var(--slate-100); color: var(--slate-500); font-size: 14px; }
+.mr-privacy { display: flex; align-items: center; gap: 7px; padding: 12px 20px; background: var(--slate-50); border-top: 1px solid var(--slate-100); color: var(--slate-500); font-size: 13px; }
+
+@media (max-width: 640px) {
+  .mr-stats { grid-template-columns: 1fr 1fr; }
+  .mr-stats > div:first-child { grid-column: 1 / -1; }
+  .mr-item { padding: 16px; gap: 12px; }
+}
