@@ -4,6 +4,7 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/notifications.php';
 require_once __DIR__ . '/../includes/wallet.php';
 require_once __DIR__ . '/../includes/availability.php';
+require_once __DIR__ . '/../includes/payment-panel.php';
 
 define('HQ_BASE_URL', '..');
 requireRole(['Patient']);
@@ -24,6 +25,7 @@ if (!$appointmentId || !$pdo) {
 // even see another patient's booking through this page.
 $stmt = $pdo->prepare(
     "SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.Concern, a.BookingFeePaid, a.PhysicianID, a.Status,
+            GREATEST(0, TIMESTAMPDIFF(SECOND, NOW(), a.CreatedAt + INTERVAL " . UNPAID_HOLD_MINUTES . " MINUTE)) AS HoldSeconds,
             c.ClinicID, c.ClinicName, c.BaseConsultationFee,
             phy.FirstName AS PhyFirstName, phy.LastName AS PhyLastName
      FROM Appointments a
@@ -50,7 +52,8 @@ $isAjax = ($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch';
 // the "payment_mode" field (wallet or card), not by a different form_type
 // per button, so the UI only ever needs a single Pay Now action.
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form_type'] ?? '') === 'submit_payment') {
-    $paymentMode = ($_POST['payment_mode'] ?? '') === 'wallet' ? 'wallet' : 'card';
+    // Wallet really deducts; GCash, Maya and card are simulated (demo) methods.
+    $paymentMode = isset(PAYMENT_METHODS[$_POST['payment_mode'] ?? '']) ? $_POST['payment_mode'] : 'card';
 
     $clinicLocked = false;
     if (!verifyCsrfToken($_POST['csrf_token'] ?? null)) {
@@ -78,8 +81,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form_type'] ?? '') === 'su
             }
 
             if ($paid ?? false) {
-                $pdo->prepare("UPDATE Appointments SET BookingFeePaid = 1, BookingFeePaidAt = NOW() WHERE AppointmentID = ? AND PatientID = ?")
-                    ->execute([$appointmentId, $user['UserID']]);
+                $pdo->prepare("UPDATE Appointments SET BookingFeePaid = 1, BookingFeePaidAt = NOW(), BookingPaymentMethod = ? WHERE AppointmentID = ? AND PatientID = ?")
+                    ->execute([$paymentMode, $appointmentId, $user['UserID']]);
                 $pdo->commit();
 
                 notifyClinic(
@@ -127,59 +130,34 @@ $pageTitle = 'Checkout — HealthQueue';
 require __DIR__ . '/../includes/header.php';
 ?>
 
-<main class="portal-shell"><div class="container">
-  <a href="<?= HQ_BASE_URL ?>/patient/dashboard.php" class="back-link">&larr; Back to dashboard</a>
+<main class="portal-shell"><div class="container pay-page">
+  <a href="<?= HQ_BASE_URL ?>/patient/my-appointments.php?tab=pending" class="back-link">&larr; Back to My Appointments</a>
 
-  <section class="portal-hero" style="margin-top:18px;">
-    <div>
-      <span class="eyebrow">Checkout</span>
-      <h1>Pay Booking Fee</h1>
-      <p>Paying the booking fee sends your request to <?= htmlspecialchars($appointment['ClinicName']) ?> for confirmation.</p>
-    </div>
-  </section>
-
+  <?php renderPaySteps(); ?>
   <?php if ($errors): ?><div class="form-message error" role="alert"><ul><?php foreach ($errors as $error): ?><li><?= htmlspecialchars($error) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
 
-  <section class="portal-section">
-    <div class="portal-heading"><div><span class="section-kicker">Summary</span><h2>Appointment request</h2></div></div>
-    <div class="compact-list" style="margin-bottom:18px;">
-      <article>
-        <div>
-          <strong><?= htmlspecialchars($appointment['ClinicName']) ?></strong>
-          <span><?= $appointment['PhyFirstName'] ? 'Dr. ' . htmlspecialchars($appointment['PhyFirstName'] . ' ' . $appointment['PhyLastName']) : 'No physician preference' ?> &middot; <?= htmlspecialchars(date('M j, Y', strtotime($appointment['AppointmentDate']))) ?> at <?= htmlspecialchars(date('g:i A', strtotime($appointment['AppointmentTime']))) ?></span>
-        </div>
-        <strong class="money">PHP <?= number_format((float) $appointment['BaseConsultationFee'], 2) ?></strong>
-      </article>
-    </div>
+  <?php $fee = (float) $appointment['BaseConsultationFee']; ?>
+  <form method="post" class="pay-layout">
+    <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
+    <input type="hidden" name="form_type" value="submit_payment">
+    <input type="hidden" name="appointment_id" value="<?= (int) $appointmentId ?>">
 
-    <div class="dev-note" style="margin-bottom:18px;">
-      <strong>Simulated payment:</strong> HealthQueue is not yet connected to a real payment processor or wallet provider. Either option below instantly marks this booking fee as paid for demonstration purposes — no real transaction occurs and no money changes hands.
-    </div>
+    <?php renderPaymentMethods('payment_mode', $walletBalance, $fee, HQ_BASE_URL . '/patient/wallet.php'); ?>
 
-    <?php $canPayWithWallet = $walletBalance >= (float) $appointment['BaseConsultationFee']; ?>
-    <form method="post" style="max-width:420px;">
-      <input type="hidden" name="csrf_token" value="<?= htmlspecialchars(csrfToken()) ?>">
-      <input type="hidden" name="form_type" value="submit_payment">
-      <input type="hidden" name="appointment_id" value="<?= (int) $appointmentId ?>">
-
-      <label style="display:block;margin-bottom:8px;font-size:13.5px;font-weight:600;color:var(--slate-700);">Mode of Payment</label>
-      <div class="payment-mode-options">
-        <label class="payment-mode-option<?= $canPayWithWallet ? '' : ' is-disabled' ?>">
-          <input type="radio" name="payment_mode" value="wallet" <?= $canPayWithWallet ? 'checked' : 'disabled' ?>>
-          <span>Wallet <span style="color:var(--slate-400);">— Balance PHP <?= number_format($walletBalance, 2) ?></span></span>
-        </label>
-        <label class="payment-mode-option">
-          <input type="radio" name="payment_mode" value="card" <?= $canPayWithWallet ? '' : 'checked' ?>>
-          <span>Simulated Card</span>
-        </label>
-      </div>
-      <?php if (!$canPayWithWallet): ?>
-        <p class="admin-empty" style="text-align:left;margin:10px 0 0;">Wallet balance not enough to cover this fee. <a href="<?= HQ_BASE_URL ?>/patient/wallet.php" class="text-link">Top up your wallet <span>&rarr;</span></a></p>
-      <?php endif; ?>
-
-      <button type="submit" class="btn btn-primary btn-block" style="margin-top:16px;">Pay Now — PHP <?= number_format((float) $appointment['BaseConsultationFee'], 2) ?></button>
-    </form>
-  </section>
+    <aside class="pay-summary">
+      <p class="pay-hold" data-hold-seconds="<?= (int) $appointment['HoldSeconds'] ?>"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> <span>Slot held for <b data-hold-left>15:00</b></span></p>
+      <h3><?= htmlspecialchars($appointment['ClinicName']) ?></h3>
+      <p class="pay-sub"><?= $appointment['PhyFirstName'] ? 'Dr. ' . htmlspecialchars($appointment['PhyFirstName'] . ' ' . $appointment['PhyLastName']) : 'No physician preference' ?> · <?= htmlspecialchars(trim((string) $appointment['Concern']) !== '' ? mb_strimwidth($appointment['Concern'], 0, 40, '…') : 'General consultation') ?></p>
+      <p class="pay-sub"><?= htmlspecialchars(date('D, M j, Y', strtotime($appointment['AppointmentDate'])) . ' · ' . date('g:i A', strtotime($appointment['AppointmentTime']))) ?></p>
+      <dl class="pay-rows">
+        <div><dt>Booking fee</dt><dd>₱<?= number_format($fee, 2) ?></dd></div>
+        <div class="pay-total"><dt>Pay now</dt><dd>₱<?= number_format($fee, 2) ?></dd></div>
+      </dl>
+      <button type="submit" class="btn btn-outline btn-block pay-btn">Pay ₱<?= number_format($fee, 2) ?></button>
+      <p class="pay-refund"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg> <span>If the clinic declines, <b>₱<?= number_format($fee) ?></b> goes back to your wallet.</span></p>
+      <a href="<?= HQ_BASE_URL ?>/patient/my-appointments.php?tab=pending#appt-<?= (int) $appointmentId ?>" class="pay-change">Change schedule</a>
+    </aside>
+  </form>
 </div></main>
 
 <?php require __DIR__ . '/../includes/footer.php'; ?>

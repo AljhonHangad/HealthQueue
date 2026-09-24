@@ -456,3 +456,17 @@ CREATE TABLE IF NOT EXISTS PhysicianDateAvailability (
     CONSTRAINT fk_dateavail_physician FOREIGN KEY (PhysicianID) REFERENCES Users (UserID),
     INDEX idx_dateavail_physician_date (PhysicianID, AvailDate)
 );
+
+-- Structured consultation notes (SOAP sections, vitals, medicine rows) kept
+-- as JSON alongside the plain-text ClinicalNotes/PrescriptionText, which are
+-- still written for the patient-facing record pages.
+ALTER TABLE ConsultationVersions
+    ADD COLUMN IF NOT EXISTS NotesJson TEXT NULL AFTER PrescriptionText;
+
+-- Whether the patient consented to the consultation being recorded.
+ALTER TABLE Consultations
+    ADD COLUMN IF NOT EXISTS RecordingConsent TINYINT NOT NULL DEFAULT 0 AFTER AudioDurationSeconds;
+
+-- How the (simulated) booking fee was paid: wallet, gcash, maya or card.
+ALTER TABLE Appointments
+    ADD COLUMN IF NOT EXISTS BookingPaymentMethod VARCHAR(20) NULL AFTER BookingFeePaidAt;

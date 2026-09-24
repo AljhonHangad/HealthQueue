@@ -328,3 +328,68 @@ document.addEventListener('DOMContentLoaded', function () {
     update();
   });
 });
+
+// Pay booking fee panel (includes/payment-panel.php): highlight the chosen
+// method, show card fields for "card" and a demo note for e-wallets.
+function hqSyncPayMethods(container) {
+  var checked = container.querySelector('input[type="radio"]:checked');
+  var method = checked ? checked.value : '';
+  container.querySelectorAll('.pay-method').forEach(function (label) {
+    label.classList.toggle('is-selected', label.getAttribute('data-method') === method);
+  });
+  var card = container.querySelector('[data-card-fields]');
+  if (card) card.hidden = method !== 'card';
+  var ewallet = container.querySelector('[data-ewallet-note]');
+  if (ewallet) ewallet.hidden = method !== 'gcash' && method !== 'maya';
+}
+document.addEventListener('change', function (e) {
+  var container = e.target.closest && e.target.closest('[data-pay-methods]');
+  if (container) hqSyncPayMethods(container);
+});
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('[data-pay-methods]').forEach(hqSyncPayMethods);
+});
+
+// Sets the wallet option's balance text and whether it can be used.
+window.hqSetWallet = function (container, balanceText, canPay) {
+  var radio = container.querySelector('input[value="wallet"]');
+  var label = container.querySelector('.pay-method-wallet');
+  var note = container.querySelector('[data-wallet-note]');
+  if (!radio || !label) return;
+  radio.disabled = !canPay;
+  label.classList.toggle('is-disabled', !canPay);
+  if (note) {
+    note.textContent = '₱' + balanceText + ' balance' + (canPay ? '' : ' · not enough');
+    note.classList.toggle('is-short', !canPay);
+  }
+  var pick = container.querySelector('input[value="' + (canPay ? 'wallet' : 'card') + '"]');
+  if (pick) pick.checked = true;
+  hqSyncPayMethods(container);
+};
+
+// "Slot held for 14:24" countdown for an unpaid booking.
+window.hqStartHold = function (el, seconds) {
+  if (!el) return;
+  clearInterval(el._holdTimer);
+  var left = Math.max(0, parseInt(seconds, 10) || 0);
+  el.querySelector('span').innerHTML = 'Slot held for <b data-hold-left></b>';
+  var out = el.querySelector('[data-hold-left]');
+  var tick = function () {
+    if (left <= 0) {
+      el.classList.add('is-expired');
+      el.querySelector('span').textContent = 'Hold expired — pay now to keep the slot if it is still free';
+      clearInterval(el._holdTimer);
+      return;
+    }
+    el.classList.remove('is-expired');
+    if (out) out.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0');
+    left--;
+  };
+  tick();
+  el._holdTimer = setInterval(tick, 1000);
+};
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('[data-hold-seconds]').forEach(function (el) {
+    if (el.getAttribute('data-hold-seconds') !== '') window.hqStartHold(el, el.getAttribute('data-hold-seconds'));
+  });
+});

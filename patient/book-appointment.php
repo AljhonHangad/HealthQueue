@@ -87,6 +87,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'fee' => number_format($fee, 2),
                     'wallet_balance' => number_format($walletBalance, 2),
                     'can_pay_with_wallet' => $walletBalance >= $fee,
+                    'fee_short' => number_format($fee),
+                    'concern' => $values['concern'] !== '' ? mb_strimwidth($values['concern'], 0, 40, '…') : 'General consultation',
+                    'appointment_when' => date('D, M j, Y', strtotime($values['appointment_date'])) . ' · ' . date('g:i A', strtotime($values['appointment_time'])),
+                    'hold_seconds' => UNPAID_HOLD_MINUTES * 60,
                 ]);
                 exit;
             }

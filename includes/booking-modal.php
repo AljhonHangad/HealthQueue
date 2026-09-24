@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/payment-panel.php';
 /**
  * Shared "Book an appointment" modal + "Review & Pay" drawer for patient pages.
  *
@@ -86,44 +87,28 @@ if ($pdo) {
 </div>
 
 <div class="modal-overlay" id="payDrawer">
-  <div class="modal-box">
+  <div class="modal-box modal-box-wide pay-modal">
     <button type="button" class="modal-close" data-modal-close aria-label="Close">&times;</button>
     <div id="payDrawerContent">
-      <h2>Review &amp; Pay</h2>
-      <p class="modal-subtitle">Review your total, then choose how you'd like to pay. Paying sends your request to the clinic for confirmation.</p>
+      <?php renderPaySteps(); ?>
       <div id="payDrawerErrors" class="form-message error" role="alert" style="display:none;"></div>
-      <div class="compact-list" style="margin-bottom:18px;">
-        <article>
-          <div>
-            <strong id="payDrawerClinic"></strong>
-            <span id="payDrawerDetails"></span>
-          </div>
-          <div style="text-align:right;">
-            <span style="display:block;color:var(--slate-400);font-size:11px;text-transform:uppercase;letter-spacing:.04em;">Total</span>
-            <strong class="money" id="payDrawerFee"></strong>
-          </div>
-        </article>
+      <div class="pay-layout">
+        <?php renderPaymentMethods('pay_drawer_mode', null, null, HQ_BASE_URL . '/patient/wallet.php'); ?>
+        <aside class="pay-summary">
+          <p class="pay-hold" data-hold-seconds="" id="payDrawerHold"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> <span>Slot held for <b data-hold-left>15:00</b></span></p>
+          <h3 id="payDrawerClinic"></h3>
+          <p class="pay-sub" id="payDrawerDoctor"></p>
+          <p class="pay-sub" id="payDrawerWhen"></p>
+          <dl class="pay-rows">
+            <div><dt>Booking fee</dt><dd id="payDrawerFee"></dd></div>
+            <div class="pay-total"><dt>Pay now</dt><dd id="payDrawerTotal"></dd></div>
+          </dl>
+          <button type="button" class="btn btn-outline btn-block pay-btn" id="payDrawerPayBtn">Pay</button>
+          <p class="pay-refund"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg> <span>If the clinic declines, <b id="payDrawerRefund"></b> goes back to your wallet.</span></p>
+          <a href="<?= HQ_BASE_URL ?>/patient/my-appointments.php?tab=pending" class="pay-change" id="payDrawerChange">Change schedule</a>
+        </aside>
       </div>
-      <div class="dev-note" style="margin-bottom:18px;">
-        <strong>Simulated payment:</strong> HealthQueue is not connected to a real payment processor or wallet provider. Paying instantly marks this booking fee as paid for demonstration purposes — no real transaction occurs.
-      </div>
-
-      <label style="display:block;margin-bottom:8px;font-size:13.5px;font-weight:600;color:var(--slate-700);">Mode of Payment</label>
-      <div class="payment-mode-options" id="payDrawerModeOptions">
-        <label class="payment-mode-option is-disabled" id="payDrawerWalletOption">
-          <input type="radio" name="pay_drawer_mode" value="wallet" id="payDrawerWalletRadio" disabled>
-          <span>Wallet <span id="payDrawerWalletBalanceText" style="color:var(--slate-400);"></span></span>
-        </label>
-        <label class="payment-mode-option">
-          <input type="radio" name="pay_drawer_mode" value="card" id="payDrawerCardRadio" checked>
-          <span>Simulated Card</span>
-        </label>
-      </div>
-      <p id="payDrawerWalletNote" class="admin-empty" style="text-align:left;margin:10px 0 0;display:none;"></p>
-
-      <button type="button" class="btn btn-primary btn-block" id="payDrawerPayBtn" style="margin-top:16px;">Pay Now</button>
     </div>
-
     <div id="paySuccessState" style="display:none;text-align:center;padding:24px 0 8px;">
       <svg class="success-check" width="76" height="76" viewBox="0 0 76 76">
         <circle class="success-check-circle" cx="38" cy="38" r="34" fill="none" stroke="#0077b3" stroke-width="4"/>
@@ -274,14 +259,8 @@ document.addEventListener('DOMContentLoaded', function () {
   var bookModal = document.getElementById('bookNowModal');
   var payDrawer = document.getElementById('payDrawer');
   var payClinic = document.getElementById('payDrawerClinic');
-  var payDetails = document.getElementById('payDrawerDetails');
-  var payFee = document.getElementById('payDrawerFee');
   var payBtn = document.getElementById('payDrawerPayBtn');
-  var walletOption = document.getElementById('payDrawerWalletOption');
-  var walletRadio = document.getElementById('payDrawerWalletRadio');
-  var cardRadio = document.getElementById('payDrawerCardRadio');
-  var walletBalanceText = document.getElementById('payDrawerWalletBalanceText');
-  var walletNote = document.getElementById('payDrawerWalletNote');
+  var payMethods = payDrawer ? payDrawer.querySelector('[data-pay-methods]') : null;
   var payErrors = document.getElementById('payDrawerErrors');
   var payDrawerContent = document.getElementById('payDrawerContent');
   var paySuccessState = document.getElementById('paySuccessState');
@@ -330,27 +309,17 @@ document.addEventListener('DOMContentLoaded', function () {
           if (data.ok) {
             currentAppointmentId = data.appointment_id;
             payClinic.textContent = data.clinic_name;
-            payDetails.textContent = data.physician_label + ' · ' + data.appointment_date + ' at ' + data.appointment_time;
-            payFee.textContent = 'PHP ' + data.fee;
-            payBtn.textContent = 'Pay Now — PHP ' + data.fee;
+            document.getElementById('payDrawerDoctor').textContent = data.physician_label + (data.concern ? ' · ' + data.concern : '');
+            document.getElementById('payDrawerWhen').textContent = data.appointment_when;
+            document.getElementById('payDrawerFee').textContent = '₱' + data.fee;
+            document.getElementById('payDrawerTotal').textContent = '₱' + data.fee;
+            document.getElementById('payDrawerRefund').textContent = '₱' + data.fee_short;
+            document.getElementById('payDrawerChange').href = '<?= HQ_BASE_URL ?>/patient/my-appointments.php?tab=pending#appt-' + data.appointment_id;
+            payBtn.textContent = 'Pay ₱' + data.fee;
             payBtn.disabled = false;
             payErrors.style.display = 'none';
-
-            walletBalanceText.textContent = '— Balance PHP ' + data.wallet_balance;
-            if (data.can_pay_with_wallet) {
-              walletOption.classList.remove('is-disabled');
-              walletRadio.disabled = false;
-              walletRadio.checked = true;
-              cardRadio.checked = false;
-              walletNote.style.display = 'none';
-            } else {
-              walletOption.classList.add('is-disabled');
-              walletRadio.disabled = true;
-              walletRadio.checked = false;
-              cardRadio.checked = true;
-              walletNote.textContent = 'Wallet balance: PHP ' + data.wallet_balance + ' — not enough to cover this fee.';
-              walletNote.style.display = 'block';
-            }
+            if (window.hqSetWallet && payMethods) window.hqSetWallet(payMethods, data.wallet_balance, data.can_pay_with_wallet);
+            if (window.hqStartHold) window.hqStartHold(document.getElementById('payDrawerHold'), data.hold_seconds);
 
             window.hqCloseModal(bookModal);
             window.hqOpenModal(payDrawer);
@@ -367,7 +336,8 @@ document.addEventListener('DOMContentLoaded', function () {
   if (payBtn) {
     payBtn.addEventListener('click', function () {
       if (!currentAppointmentId) return;
-      var mode = (walletRadio && walletRadio.checked) ? 'wallet' : 'card';
+      var checked = payMethods ? payMethods.querySelector('input[type="radio"]:checked') : null;
+      var mode = checked ? checked.value : 'card';
       var originalText = payBtn.textContent;
       payBtn.disabled = true;
       payBtn.textContent = 'Processing…';

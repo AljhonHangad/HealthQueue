@@ -204,12 +204,23 @@ require __DIR__ . '/../includes/header.php';
         <?php foreach ($prescriptions as $rx): ?>
           <?php
             $lines = array_values(array_filter(array_map('trim', preg_split('/\r?\n/', $rx['PrescriptionText'])), 'strlen'));
-            $rxTitle = $lines[0] ?? 'Prescription';
-            $rxDetail = array_slice($lines, 1);
+            // Structured prescriptions store one medicine per line as
+            // "Name — how often — how long"; show each medicine as its own row.
+            // Older free-text ones: first line is the title, the rest details.
+            if ($lines && str_contains(implode("\n", $lines), ' — ')) {
+                $rxItems = array_map(static fn(string $line): array => explode(' — ', $line), $lines);
+            } else {
+                $rxItems = [[$lines[0] ?? 'Prescription', ...array_slice($lines, 1)]];
+            }
+          ?>
+          <?php foreach ($rxItems as $itemIndex => $parts): ?>
+          <?php
+            $rxTitle = array_shift($parts);
+            $rxDetail = $parts;
             $rxDetail[] = $doctorLabel($rx);
             $rxDetail[] = date('M j', strtotime($rx['AppointmentDate']));
           ?>
-          <article class="mr-item<?= $rx['IsActive'] ? '' : ' is-ended' ?>" id="rx-<?= (int) $rx['AppointmentID'] ?>">
+          <article class="mr-item<?= $rx['IsActive'] ? '' : ' is-ended' ?>"<?= $itemIndex === 0 ? ' id="rx-' . (int) $rx['AppointmentID'] . '"' : '' ?>>
             <span class="mr-icon <?= $rx['IsActive'] ? 'mr-icon-green' : 'mr-icon-muted' ?>"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m10.5 20.5 10-10a4.95 4.95 0 1 0-7-7l-10 10a4.95 4.95 0 1 0 7 7Z"/><path d="m8.5 8.5 7 7"/></svg></span>
             <div class="mr-body">
               <div class="mr-title-row">
@@ -219,6 +230,7 @@ require __DIR__ . '/../includes/header.php';
               <p class="mr-sub"><?= htmlspecialchars(implode(' · ', $rxDetail)) ?></p>
             </div>
           </article>
+          <?php endforeach; ?>
         <?php endforeach; ?>
       </div>
       <p class="mr-note">Prescriptions show as active for <?= PRESCRIPTION_ACTIVE_DAYS ?> days after your visit. Always follow your physician's instructions.</p>

@@ -240,12 +240,18 @@ require __DIR__ . '/../includes/header.php';
 
   <section class="cal-card cal-editor">
     <div class="cal-editor-head">
-      <div class="cal-mode" role="tablist">
-        <button type="button" class="is-active" data-mode="available">Available</button>
-        <button type="button" data-mode="dayoff">Day off</button>
+      <div class="cal-mode" role="tablist" aria-label="What to set">
+        <button type="button" class="is-active" data-mode="available">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+          Available
+        </button>
+        <button type="button" data-mode="dayoff">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18M9 15l6 0"/></svg>
+          Day off
+        </button>
       </div>
       <span class="cal-selected-count" id="calSelectedCount">No dates selected</span>
-      <button type="button" class="btn btn-outline btn-sm" id="calClear">Clear selection</button>
+      <button type="button" class="cal-clear" id="calClear">Clear selection</button>
     </div>
 
     <form method="post" id="calForm">
@@ -255,28 +261,46 @@ require __DIR__ . '/../includes/header.php';
       <input type="hidden" name="form_type" id="calFormType" value="add_hours">
 
       <div data-mode-panel="available">
-        <div class="av-times">
-          <select name="start_time" aria-label="Start time">
-            <?php foreach ($timeOptions as $value => $label): ?><option value="<?= $value ?>"<?= $value === '08:00' ? ' selected' : '' ?>><?= $label ?></option><?php endforeach; ?>
-          </select>
-          <span class="av-to">to</span>
-          <select name="end_time" aria-label="End time">
-            <?php foreach ($timeOptions as $value => $label): ?><option value="<?= $value ?>"<?= $value === '12:00' ? ' selected' : '' ?>><?= $label ?></option><?php endforeach; ?>
-          </select>
-          <select name="per_hour" aria-label="Patients per hour">
-            <option value="">Default (4 patients/hr)</option>
-            <?php for ($n = 1; $n <= 12; $n++): ?><option value="<?= $n ?>"><?= $n ?> patient<?= $n === 1 ? '' : 's' ?>/hr</option><?php endfor; ?>
-          </select>
+        <div class="cal-fields">
+          <label class="cal-field">
+            <span>From</span>
+            <select name="start_time">
+              <?php foreach ($timeOptions as $value => $label): ?><option value="<?= $value ?>"<?= $value === '08:00' ? ' selected' : '' ?>><?= $label ?></option><?php endforeach; ?>
+            </select>
+          </label>
+          <span class="cal-arrow" aria-hidden="true">&rarr;</span>
+          <label class="cal-field">
+            <span>To</span>
+            <select name="end_time">
+              <?php foreach ($timeOptions as $value => $label): ?><option value="<?= $value ?>"<?= $value === '12:00' ? ' selected' : '' ?>><?= $label ?></option><?php endforeach; ?>
+            </select>
+          </label>
+          <label class="cal-field cal-field-wide">
+            <span>Patients per hour</span>
+            <select name="per_hour">
+              <option value="">Default · 4 patients/hr</option>
+              <?php for ($n = 1; $n <= 12; $n++): ?><option value="<?= $n ?>"><?= $n ?> patient<?= $n === 1 ? '' : 's' ?>/hr</option><?php endfor; ?>
+            </select>
+          </label>
         </div>
-        <p class="av-help">Patients can book up to this many per hour (4 if left on default). Adding hours to a day off turns it into a working day. Dates where the hours would overlap existing ones are skipped.</p>
+        <p class="cal-note">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+          <span>Adding hours to a day off turns it back into a working day. Dates where the hours would overlap existing ones are skipped.</span>
+        </p>
       </div>
       <div data-mode-panel="dayoff" hidden>
-        <p class="av-help">Selected dates become days off and any hours on them are removed. Patients already booked with you on those dates are notified, and the front desk is told to reschedule them.</p>
+        <p class="cal-note cal-note-warn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/></svg>
+          <span>Selected dates become days off and their hours are removed. Patients already booked with you on those dates are notified, and the front desk is asked to reschedule them.</span>
+        </p>
       </div>
 
-      <div class="av-panel-actions">
-        <button type="submit" class="btn btn-outline" data-action="clear_dates">Remove from selected</button>
-        <button type="submit" class="btn btn-primary" data-action="primary" id="calPrimary">Add hours to 0 dates</button>
+      <div class="cal-actions">
+        <button type="submit" class="cal-remove" data-action="clear_dates">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+          Remove from selected
+        </button>
+        <button type="submit" class="btn btn-primary cal-primary" data-action="primary" id="calPrimary">Add hours to 0 dates</button>
       </div>
     </form>
   </section>
@@ -299,6 +323,7 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     var n = selected.size;
     countEl.textContent = n ? n + ' date' + (n === 1 ? '' : 's') + ' selected' : 'No dates selected';
+    countEl.classList.toggle('has-selection', n > 0);
     primary.textContent = (mode === 'available' ? 'Add hours to ' : 'Mark as day off: ') + n + ' date' + (n === 1 ? '' : 's');
     primary.disabled = n === 0;
     form.querySelector('[data-action="clear_dates"]').disabled = n === 0;
